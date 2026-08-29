@@ -54,6 +54,41 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "yt-dlp @ https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.tar.gz" \
     mutagen
 
+# ============================================
+# CUDA 11 RUNTIME LIBRARIES (GPU acceleration for Essentia/TensorFlow)
+# ============================================
+# essentia-tensorflow bundles a libtensorflow built against CUDA 11 + cuDNN 8.
+# The base image ships none of those runtime libs, so TF silently falls back to
+# CPU. We install NVIDIA's pip wheels (the same mechanism tensorflow[and-cuda]
+# uses) to provide the exact sonames the bundled TF dlopens at runtime:
+#   libcudart.so.11.0  libcublas.so.11  libcublasLt.so.11  libcudnn.so.8
+#   libcufft.so.10     libcurand.so.10  libcusolver.so.11  libcusparse.so.11
+# Versions are the coherent CUDA 11.8 / cuDNN 8.7 set (== tensorflow 2.12's
+# [and-cuda] extras). CUDA 11 minor-version compatibility covers the TF build's
+# 11.2 target on any 450+ host driver. Still requires `runtime: nvidia`
+# (or --gpus all) on the container to actually see the GPU.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip3 install --break-system-packages \
+    nvidia-cuda-runtime-cu11==11.8.89 \
+    nvidia-cublas-cu11==11.11.3.6 \
+    nvidia-cudnn-cu11==8.7.0.84 \
+    nvidia-cufft-cu11==10.9.0.58 \
+    nvidia-curand-cu11==10.3.0.86 \
+    nvidia-cusolver-cu11==11.4.1.48 \
+    nvidia-cusparse-cu11==11.7.5.86
+
+# Register the wheel-provided CUDA libs with the dynamic linker so the bundled
+# TensorFlow resolves them by soname at runtime (no LD_LIBRARY_PATH needed).
+RUN python3 - <<'PY'
+import glob, os, nvidia
+base = os.path.dirname(nvidia.__file__)
+dirs = sorted({os.path.dirname(p) for p in glob.glob(os.path.join(base, "*", "lib", "*.so*"))})
+with open("/etc/ld.so.conf.d/nvidia-cuda.conf", "w") as f:
+    f.write("\n".join(dirs) + "\n")
+print("Registered CUDA lib dirs:\n" + "\n".join(dirs))
+PY
+RUN ldconfig
+
 # Download Essentia ML models (~200MB total) - these enable Enhanced vibe matching
 RUN set -eu; \
     download_model() { \
@@ -178,6 +213,12 @@ WORKDIR /app
 # Copy healthcheck script
 COPY healthcheck-prod.js /app/healthcheck.js
 
+# Default so the [program:backend] supervisor block's %(ENV_SOULSEEK_DEBUG)s
+# always resolves. Without this, supervisord aborts on startup when the caller
+# doesn't set SOULSEEK_DEBUG (the backend reads === "true", so "false" = off).
+# Override at runtime with -e SOULSEEK_DEBUG=true.
+ENV SOULSEEK_DEBUG=false
+
 # Create supervisord config - logs to stdout/stderr for Docker visibility
 RUN cat > /etc/supervisor/conf.d/lidify.conf << 'EOF'
 [supervisord]
@@ -239,7 +280,7 @@ stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
 stderr_logfile_maxbytes=0
-environment=DATABASE_URL="postgresql://lidify:lidify@localhost:5432/lidify",REDIS_URL="redis://localhost:6379",MUSIC_PATH="/music",DOWNLOAD_PATH="/soulseek-downloads",BATCH_SIZE="10",SLEEP_INTERVAL="5"
+environment=DATABASE_URL="postgresql://lidify:lidify@localhost:5432/lidify",REDIS_URL="redis://localhost:6379",MUSIC_PATH="/music",DOWNLOAD_PATH="/soulseek-downloads",BATCH_SIZE="10",SLEEP_INTERVAL="5",TF_FORCE_GPU_ALLOW_GROWTH="true",TF_CPP_MIN_LOG_LEVEL="1"
 priority=50
 EOF
 

@@ -1,0 +1,45 @@
+# Keep the build context (and the SSH transfer for remote Unraid builds) small.
+# The Dockerfile installs deps fresh (npm ci) and builds Next.js itself, so none
+# of the local build artifacts below are needed — and shipping them is slow.
+
+# Dependencies (reinstalled via npm ci inside the image)
+node_modules
+**/node_modules
+
+# Build outputs (rebuilt inside the image)
+**/.next
+**/dist
+backend/dist
+frontend/.next
+
+# VCS / editor / CI
+.git
+.gitignore
+.github
+.vscode
+
+# Secrets and local env (compose reads .env locally; never bake into the image)
+.env
+.env.*
+!.env.example
+
+# Local data / caches / logs
+data
+appdata
+**/*.log
+**/.cache
+**/coverage
+**/.turbo
+
+# Docs and planning (not needed at build time)
+*.md
+docs
+plans
+plan*.md
+DEVELOPMENT_HISTORY.md
+assets
+examples
+
+# OS cruft
+.DS_Store
+Thumbs.db

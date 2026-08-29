@@ -1,0 +1,66 @@
+# GPU-enabled build + deploy for Unraid, driven from VS Code (.vscode/tasks.json).
+#
+# Builds the all-in-one image (with the CUDA 11 runtime wheels added in
+# Dockerfile) on the Unraid Docker daemon over an SSH docker context, then runs
+# it with the GPU attached. This is the source of truth for the GPU deployment;
+# the repo's other docker-compose*.yml files pull prebuilt registry images.
+#
+# Usage (from VS Code):
+#   1. Run task "Unraid: create docker context" once.
+#   2. Run task "Deploy to Unraid" (Ctrl/Cmd+Shift+B) after any code change.
+#
+# Secrets/overrides come from a local .env next to this file, e.g.:
+#   OPENROUTER_API_KEY=sk-or-...
+#   MUSIC_PATH=/mnt/user/media/music
+#   LIDIFY_APPDATA=/mnt/user/appdata/lidify
+#   LIDIFY_CALLBACK_URL=http://10.0.0.200:3030
+services:
+  # One-shot: create + chmod the bind-mounted appdata subdirs (redis/postgres)
+  # before Lidify starts. Redis won't create its own data dir and fails without
+  # this on a fresh Unraid appdata folder (owned root:root). See project memory.
+  init-permissions:
+    image: alpine:latest
+    container_name: lidify-init-permissions
+    volumes:
+      - ${LIDIFY_APPDATA:-/mnt/user/appdata/lidify}:/data
+    command: ["sh", "-c", "mkdir -p /data/redis /data/postgres && chmod -R 777 /data"]
+    restart: "no"
+
+  lidify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lidify:cuda
+    container_name: lidify
+    # Attach the NVIDIA GPU (Essentia/TensorFlow mood analysis). Requires the
+    # Unraid Nvidia Driver plugin and an image built from this Dockerfile.
+    runtime: nvidia
+    depends_on:
+      init-permissions:
+        condition: service_completed_successfully
+    ports:
+      - "${PORT:-3030}:3030"
+    volumes:
+      - ${MUSIC_PATH:-/mnt/user/media/music}:/music
+      - ${LIDIFY_APPDATA:-/mnt/user/appdata/lidify}:/data
+    environment:
+      - TZ=${TZ:-America/Chicago}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      # GPU: ONE analyzer worker only. Each worker opens its own TF/CUDA context
+      # and multiple contexts OOM a small card. TF_FORCE_GPU_ALLOW_GROWTH is
+      # ignored by Essentia (MTG/essentia #1432) so there is no per-process cap.
+      # Raise to 2-4 only if you revert to a CPU-only image. See KNOWN_ISSUES.md.
+      - NUM_WORKERS=${NUM_WORKERS:-1}
+      - SESSION_SECRET=${SESSION_SECRET:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # Must be defined (any value): supervisord interpolates %(ENV_SOULSEEK_DEBUG)s
+      # in the backend program block and aborts if the var is unset. "true" enables
+      # verbose Soulseek scoring logs; anything else is off.
+      - SOULSEEK_DEBUG=${SOULSEEK_DEBUG:-false}
+      # Real LAN IP of the Unraid host so Lidarr (a different container) can
+      # reach Lidify's webhook. host.docker.internal only resolves inside Lidify.
+      - LIDIFY_CALLBACK_URL=${LIDIFY_CALLBACK_URL:-http://10.0.0.200:3030}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

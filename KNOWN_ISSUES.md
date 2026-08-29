@@ -235,3 +235,80 @@ WHERE title IN ('The Good Son', 'Live at Royal Albert Hall')
 INSERT INTO "OwnedAlbum" ("rgMbid", "artistId", "source")
 SELECT "rgMbid", "artistId", 'native_scan' FROM "Album" WHERE "artistId" = 'manual-nick-cave-solo';
 ```
+
+---
+
+## GPU Acceleration for the Audio Analyzer (Essentia/TensorFlow)
+
+**Status:** Supported (opt-in), with caveats
+**Added:** 2026-08-29
+
+### Summary
+
+The audio analyzer uses `essentia-tensorflow`, whose bundled `libtensorflow` is
+built against **CUDA 11 + cuDNN 8**. The default image ships none of those
+runtime libraries, so TensorFlow **silently falls back to CPU** — it works, just
+slower. The `Dockerfile` now installs NVIDIA's CUDA 11.8 / cuDNN 8.7 pip wheels
+(the same mechanism `tensorflow[and-cuda]` uses) and registers them with
+`ldconfig`, so a GPU-enabled build can run mood/vibe inference on an NVIDIA card.
+
+### Requirements
+
+- Build the image locally (or via CI) from this repo's `Dockerfile`.
+- Run the container with `runtime: nvidia` (or `--gpus all`) **and**
+  `NVIDIA_VISIBLE_DEVICES=all`, `NVIDIA_DRIVER_CAPABILITIES=all`.
+- Host NVIDIA driver new enough for CUDA 11 (>= 450.80.02; any modern Unraid
+  Nvidia plugin driver qualifies). CUDA 11 minor-version compatibility covers
+  the bundled TF's 11.2 target on the newer 11.8 runtime libs.
+
+### Confirming CUDA 11 vs CUDA 12 before a full build
+
+The pinned wheels are `-cu11`. If a future `essentia-tensorflow` wheel bundles a
+TF built against CUDA 12, they won't attach and it stays on CPU. Cheap pre-flight
+check (pulls only the wheel, not a full image build):
+
+```bash
+docker run --rm python:3.11-slim bash -lc '
+  pip install -q essentia-tensorflow &&
+  d=$(python -c "import essentia,os;print(os.path.dirname(essentia.__file__))") &&
+  find "$d" -name "*.so*" -exec ldd {} \; 2>/dev/null | grep -iE "cud|cublas" | sort -u'
+```
+
+`libcudart.so.11.0 => not found` confirms CUDA 11 (pins are correct);
+`libcudart.so.12` means switch the Dockerfile wheels to their `-cu12` variants.
+
+### Verifying the GPU is actually used
+
+```bash
+docker logs lidify 2>&1 | grep -iE "Created TensorFlow device|GPU|cuda"   # want /device:GPU:0
+nvidia-smi dmon -s u                                                       # sm% moves during analysis
+```
+
+### CRITICAL: set `NUM_WORKERS=1` on GPU
+
+The analyzer spawns `NUM_WORKERS` **separate processes**, each loading its own
+TensorFlow runtime and CUDA context. On a 4 GB GTX 1050 Ti, TF advertises a
+~3.2 GB device per process, so one worker already covers most of the card.
+
+`TF_FORCE_GPU_ALLOW_GROWTH=true` **is honored** by this essentia-tensorflow build
+(verified in logs: `Overriding allow_growth setting because the
+TF_FORCE_GPU_ALLOW_GROWTH environment variable is set`, and the device is created
+below full VRAM). This contradicts the older [MTG/essentia #1432](https://github.com/MTG/essentia/issues/1432),
+which no longer applies here — so actual per-worker usage is modest, not the full
+3.2 GB ceiling. Still, **`NUM_WORKERS=1` is the safe default** on a 4 GB card:
+
+```yaml
+environment:
+  - NUM_WORKERS=1   # safe on 4 GB; try 2 and watch `nvidia-smi` for OOM before committing
+```
+
+You can cautiously try `NUM_WORKERS=2` for more CPU-side parallelism and watch
+`nvidia-smi` for OOM during a real analysis batch; back off to 1 if it crashes.
+On CPU-only builds, keep `NUM_WORKERS` at 2–4 (see project memory issue #5).
+
+### Honest expectations
+
+Only the two TensorFlow predict steps run on the GPU; audio decode (ffmpeg) and
+Essentia feature extraction stay on CPU. On a 1050 Ti-class card expect a
+few-times speedup on the ML portion, not an end-to-end transformation. The CUDA
+wheels add ~1.5–2 GB to the image.

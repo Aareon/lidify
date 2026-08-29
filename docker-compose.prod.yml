@@ -29,9 +29,20 @@ services:
       # Default uses host.docker.internal which works on most setups with extra_hosts below
       # Override if using custom Docker networks: e.g., http://192.168.0.20:3030
       - LIDIFY_CALLBACK_URL=${LIDIFY_CALLBACK_URL:-http://host.docker.internal:3030}
+      # --- GPU acceleration for the Essentia/TensorFlow audio analyzer (opt-in) ---
+      # Requires a locally-built image whose Dockerfile installed the CUDA 11
+      # runtime wheels, plus `runtime: nvidia` below. See KNOWN_ISSUES.md.
+      # IMPORTANT: pin NUM_WORKERS=1 on GPU — each worker opens its own CUDA
+      # context and multiple contexts OOM a small card (TF_FORCE_GPU_ALLOW_GROWTH
+      # is ignored by Essentia, per MTG/essentia #1432). CPU builds use 2-4.
+      # - NVIDIA_VISIBLE_DEVICES=all
+      # - NVIDIA_DRIVER_CAPABILITIES=all
+      # - NUM_WORKERS=1
     # Makes host.docker.internal work on Linux (already works on Docker Desktop)
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # --- GPU acceleration (opt-in): uncomment with the NVIDIA_* env vars above ---
+    # runtime: nvidia
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "/app/healthcheck.js"]
