@@ -1066,11 +1066,12 @@ class ApiClient {
         return this.request<{ models: OpenRouterModel[] }>("/system-settings/openrouter-models");
     }
 
-    // Test OpenRouter connection (uses API key from environment variable)
-    async testOpenRouter(model: string) {
+    // Test OpenRouter connection. Pass apiKey to test an unsaved key; otherwise
+    // the server uses the saved System Settings key / OPENROUTER_API_KEY env var.
+    async testOpenRouter(model: string, apiKey?: string) {
         return this.request<any>("/system-settings/test-openrouter", {
             method: "POST",
-            body: JSON.stringify({ model }),
+            body: JSON.stringify(apiKey ? { model, apiKey } : { model }),
         });
     }
 

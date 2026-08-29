@@ -68,21 +68,23 @@ export interface OpenRouterModel {
 }
 
 class OpenRouterService {
-    private client: AxiosInstance;
-    private apiKey: string;
-
-    constructor() {
-        this.apiKey = config.openrouter.apiKey;
-        this.client = axios.create({
-            baseURL: OPENROUTER_BASE_URL,
-            timeout: 60000,
-            headers: {
-                Authorization: `Bearer ${this.apiKey}`,
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://lidify.app",
-                "X-Title": "Lidify Music",
-            },
-        });
+    /**
+     * Resolve the effective OpenRouter API key.
+     * Precedence: encrypted key saved in System Settings (admin UI) over the
+     * OPENROUTER_API_KEY environment variable. Returns "" when neither is set.
+     * Settings are cached (see getSystemSettings), so this is cheap to call.
+     */
+    async getApiKey(): Promise<string> {
+        try {
+            const settings = await getSystemSettings();
+            const dbKey = settings?.openrouterApiKey;
+            if (dbKey && dbKey.trim()) return dbKey.trim();
+        } catch (error) {
+            console.warn(
+                "[OpenRouter] Failed to read API key from settings, falling back to env var"
+            );
+        }
+        return config.openrouter.apiKey || "";
     }
 
     /**
@@ -90,9 +92,10 @@ class OpenRouterService {
      */
     async getModels(): Promise<OpenRouterModel[]> {
         try {
+            const apiKey = await this.getApiKey();
             const response = await axios.get(`${OPENROUTER_BASE_URL}/models`, {
                 headers: {
-                    Authorization: `Bearer ${this.apiKey}`,
+                    Authorization: `Bearer ${apiKey}`,
                 },
             });
 
@@ -120,6 +123,7 @@ class OpenRouterService {
 
         const settings = await getSystemSettings();
         const model = settings?.openrouterModel || "openai/gpt-4o-mini";
+        const apiKey = await this.getApiKey();
 
         // Build context for AI
         const topArtistsText = topArtists
@@ -173,7 +177,7 @@ OUTPUT FORMAT (JSON):
 Return ONLY valid JSON, no markdown formatting.`;
 
         try {
-            const response = await this.createClient().post("/chat/completions", {
+            const response = await this.createClient(apiKey).post("/chat/completions", {
                 model,
                 messages: [
                     {
@@ -226,6 +230,7 @@ Return ONLY valid JSON, no markdown formatting.`;
     ): Promise<string> {
         const settings = await getSystemSettings();
         const model = settings?.openrouterModel || "openai/gpt-4o-mini";
+        const apiKey = await this.getApiKey();
 
         const prompt = `Given this track: "${track.title}" by ${track.artist}
 User context: ${userContext}
@@ -234,7 +239,7 @@ Provide a single-sentence reason why this track would fit in their Discover Week
 Be concise and engaging (max 15 words).`;
 
         try {
-            const response = await this.createClient().post("/chat/completions", {
+            const response = await this.createClient(apiKey).post("/chat/completions", {
                 model,
                 messages: [
                     {
@@ -267,10 +272,10 @@ Be concise and engaging (max 15 words).`;
     ): Promise<SimilarArtistRecommendation[]> {
         const { artistName, genres, albums, userLibraryArtists } = params;
 
-        // API key from environment variable only (security best practice)
-        const apiKey = config.openrouter.apiKey;
+        // Key from System Settings (admin UI) or OPENROUTER_API_KEY env var
+        const apiKey = await this.getApiKey();
         if (!apiKey) {
-            throw new Error("OpenRouter API key not configured. Set OPENROUTER_API_KEY environment variable.");
+            throw new Error("OpenRouter API key not configured. Set it in System Settings or via the OPENROUTER_API_KEY environment variable.");
         }
 
         // Get model preference from database
@@ -319,7 +324,7 @@ Return ONLY valid JSON in this exact format:
 }`;
 
         try {
-            const client = this.createClient();
+            const client = this.createClient(apiKey);
 
             const response = await client.post("/chat/completions", {
                 model,
@@ -369,10 +374,10 @@ Return ONLY valid JSON in this exact format:
     async chatAboutArtist(params: ArtistChatParams): Promise<ArtistChatResponse> {
         const { artistName, genres, albums, userLibraryArtists, messages, userMessage } = params;
 
-        // API key from environment variable only (security best practice)
-        const apiKey = config.openrouter.apiKey;
+        // Key from System Settings (admin UI) or OPENROUTER_API_KEY env var
+        const apiKey = await this.getApiKey();
         if (!apiKey) {
-            throw new Error("OpenRouter API key not configured. Set OPENROUTER_API_KEY environment variable.");
+            throw new Error("OpenRouter API key not configured. Set it in System Settings or via the OPENROUTER_API_KEY environment variable.");
         }
 
         // Get model preference from database
@@ -425,7 +430,7 @@ ALWAYS respond with valid JSON in this exact format:
 Include 6-8 recommendations. If the user's message doesn't warrant new recommendations (like "thanks"), you can return fewer or an empty array.`;
 
         try {
-            const client = this.createClient();
+            const client = this.createClient(apiKey);
 
             // Build message history for the API
             const apiMessages: Array<{ role: string; content: string }> = [
@@ -489,7 +494,7 @@ Include 6-8 recommendations. If the user's message doesn't warrant new recommend
     }): Promise<Array<{ artistName: string; trackTitle: string; reason: string }>> {
         const { topArtists, libraryArtists } = params;
 
-        const apiKey = config.openrouter.apiKey;
+        const apiKey = await this.getApiKey();
         if (!apiKey) throw new Error("OpenRouter API key not configured.");
 
         const settings = await getSystemSettings();
@@ -522,7 +527,7 @@ Return ONLY valid JSON:
 }`;
 
         try {
-            const response = await this.createClient().post("/chat/completions", {
+            const response = await this.createClient(apiKey).post("/chat/completions", {
                 model,
                 messages: [
                     { role: "system", content: "You recommend songs based on listening habits. Respond with valid JSON only." },
@@ -551,7 +556,7 @@ Return ONLY valid JSON:
     }): Promise<SimilarArtistRecommendation[]> {
         const { topArtists, libraryArtists } = params;
 
-        const apiKey = config.openrouter.apiKey;
+        const apiKey = await this.getApiKey();
         if (!apiKey) {
             throw new Error("OpenRouter API key not configured.");
         }
@@ -602,7 +607,7 @@ Return ONLY valid JSON:
 }`;
 
         try {
-            const client = this.createClient();
+            const client = this.createClient(apiKey);
             const response = await client.post("/chat/completions", {
                 model,
                 messages: [
@@ -633,30 +638,22 @@ Return ONLY valid JSON:
     }
 
     /**
-     * Check if OpenRouter is configured and available
-     * Returns true if: API key is set in env
+     * Check if OpenRouter is configured and available.
+     * True when a key is set in System Settings or the OPENROUTER_API_KEY env var.
      */
     async isAvailable(): Promise<boolean> {
-        return !!config.openrouter.apiKey;
+        return !!(await this.getApiKey());
     }
 
     /**
-     * Check if OpenRouter API key is configured (env var present)
-     * Used by frontend to determine if the toggle should be enabled
+     * Create a fresh axios client with the given API key
      */
-    isConfigured(): boolean {
-        return !!config.openrouter.apiKey;
-    }
-
-    /**
-     * Create a fresh axios client with current API key
-     */
-    private createClient(): AxiosInstance {
+    private createClient(apiKey: string): AxiosInstance {
         return axios.create({
             baseURL: OPENROUTER_BASE_URL,
             timeout: 60000,
             headers: {
-                Authorization: `Bearer ${config.openrouter.apiKey}`,
+                Authorization: `Bearer ${apiKey}`,
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://lidify.app",
                 "X-Title": "Lidify Music",

@@ -5,7 +5,7 @@ import { SettingsSection, SettingsRow } from "../ui";
 import { SystemSettings } from "../../types";
 import { InlineStatus, StatusType } from "@/components/ui/InlineStatus";
 import { api, OpenRouterModel } from "@/lib/api";
-import { Search, ChevronDown, X } from "lucide-react";
+import { Search, ChevronDown, X, Eye, EyeOff } from "lucide-react";
 
 interface AIServicesSectionProps {
     settings: SystemSettings;
@@ -18,6 +18,12 @@ export function AIServicesSection({ settings, onUpdate, onTest, isTesting }: AIS
     const [openrouterConfigured, setOpenrouterConfigured] = useState<boolean | null>(null);
     const [openrouterTestStatus, setOpenrouterTestStatus] = useState<StatusType>("idle");
     const [openrouterTestMessage, setOpenrouterTestMessage] = useState("");
+    const [showKey, setShowKey] = useState(false);
+
+    // A key entered here (stored encrypted in the DB) enables AI immediately;
+    // `openrouterConfigured` reflects the server (DB key OR env var) on mount.
+    const hasDbKey = !!(settings.openrouterApiKey && settings.openrouterApiKey.trim());
+    const effectiveConfigured = openrouterConfigured === true || hasDbKey;
 
     // Model dropdown state
     const [models, setModels] = useState<OpenRouterModel[]>([]);
@@ -114,37 +120,52 @@ export function AIServicesSection({ settings, onUpdate, onTest, isTesting }: AIS
             <SettingsRow
                 label="OpenRouter"
                 description={
-                    openrouterConfigured === false
-                        ? "Set OPENROUTER_API_KEY to enable AI features"
-                        : openrouterConfigured === null
-                            ? "Checking for API key..."
-                            : "AI features are enabled via OpenRouter"
+                    openrouterConfigured === null && !hasDbKey
+                        ? "Checking for API key..."
+                        : effectiveConfigured
+                            ? "AI features are enabled via OpenRouter"
+                            : "Add an API key below to enable AI features"
                 }
             >
                 <div className="text-sm text-[#888]">
-                    {openrouterConfigured
-                        ? "Enabled"
-                        : openrouterConfigured === false
-                            ? "Not configured"
-                            : "Checking"}
+                    {openrouterConfigured === null && !hasDbKey
+                        ? "Checking"
+                        : effectiveConfigured
+                            ? "Enabled"
+                            : "Not configured"}
                 </div>
             </SettingsRow>
 
-            {/* Show configuration message if API key is not set */}
-            {openrouterConfigured === false && (
-                <div className="px-1 py-2 text-sm text-[#888]">
-                    <p>
-                        OpenRouter API key not configured. Add{" "}
-                        <code className="px-1.5 py-0.5 bg-[#262626] rounded text-[#a3a3a3] font-mono text-xs">
-                            OPENROUTER_API_KEY
-                        </code>{" "}
-                        to your environment variables and restart the container.
-                    </p>
+            {/* API key input - stored encrypted in the database, overrides the
+                OPENROUTER_API_KEY env var. Leave blank to keep using the env var. */}
+            <SettingsRow
+                label="API Key"
+                description="Get one at openrouter.ai/keys. Overrides the OPENROUTER_API_KEY env var when set."
+            >
+                <div className="relative w-80">
+                    <input
+                        type={showKey ? "text" : "password"}
+                        value={settings.openrouterApiKey || ""}
+                        onChange={(e) => onUpdate({ openrouterApiKey: e.target.value })}
+                        placeholder={openrouterConfigured && !hasDbKey ? "Set via environment variable" : "sk-or-..."}
+                        autoComplete="off"
+                        className="w-full pr-10 px-3 py-2 bg-[#1a1a1a] border border-[#333] rounded-lg
+                            text-white text-sm placeholder-[#666]
+                            hover:border-[#444] focus:outline-none focus:ring-1 focus:ring-white/20"
+                    />
+                    <button
+                        type="button"
+                        onClick={() => setShowKey((s) => !s)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-[#666] hover:text-white"
+                        aria-label={showKey ? "Hide API key" : "Show API key"}
+                    >
+                        {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
                 </div>
-            )}
+            </SettingsRow>
 
-            {/* Show model selector and test button when configured */}
-            {openrouterConfigured && (
+            {/* Show model selector and test button once a key is available */}
+            {effectiveConfigured && (
                 <>
                     <SettingsRow
                         label="Model"

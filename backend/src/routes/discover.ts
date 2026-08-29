@@ -756,14 +756,16 @@ async function generateLastFmRecommendations(
 }
 
 /**
- * Create OpenRouter client
+ * Create OpenRouter client. Uses the resolved key (System Settings value,
+ * falling back to the OPENROUTER_API_KEY env var).
  */
 async function createOpenRouterClient() {
+    const apiKey = await openRouterService.getApiKey();
     return axios.create({
         baseURL: "https://openrouter.ai/api/v1",
         timeout: 90000,
         headers: {
-            Authorization: `Bearer ${config.openrouter.apiKey}`,
+            Authorization: `Bearer ${apiKey}`,
             "Content-Type": "application/json",
             "HTTP-Referer": "https://lidify.app",
             "X-Title": "Lidify Music",

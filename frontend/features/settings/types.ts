@@ -18,8 +18,9 @@ export interface SystemSettings {
     lidarrUrl: string;
     lidarrApiKey: string;
     lidarrQualityProfileId: number | null;
-    // AI Services (API key set via OPENROUTER_API_KEY environment variable)
+    // AI Services. openrouterApiKey overrides the OPENROUTER_API_KEY env var when set.
     openrouterModel: string;
+    openrouterApiKey?: string | null;
     fanartEnabled: boolean;
     fanartApiKey: string;
     // Audiobookshelf

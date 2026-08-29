@@ -52,6 +52,7 @@ export async function getSystemSettings(forceRefresh = false) {
         audiobookshelfApiKey: safeDecrypt(settings.audiobookshelfApiKey, 'audiobookshelfApiKey'),
         soulseekPassword: safeDecrypt(settings.soulseekPassword, 'soulseekPassword'),
         spotifyClientSecret: safeDecrypt(settings.spotifyClientSecret, 'spotifyClientSecret'),
+        openrouterApiKey: safeDecrypt(settings.openrouterApiKey, 'openrouterApiKey'),
     };
 
     cachedSettings = decrypted;

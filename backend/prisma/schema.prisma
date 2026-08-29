@@ -86,6 +86,7 @@ model SystemSettings {
   // === AI Services ===
   // OpenRouter (multi-provider LLM gateway)
   openrouterModel   String? @default("openai/gpt-4o-mini")
+  openrouterApiKey  String? // Encrypted; overrides OPENROUTER_API_KEY env var when set
 
   // Fanart.tv (for high-quality images - optional)
   fanartEnabled Boolean @default(false)

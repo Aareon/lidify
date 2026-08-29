@@ -2,8 +2,8 @@ import axios from "axios";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path from "path";
-import { config } from "../config";
 import { prisma } from "../utils/db";
+import { openRouterService } from "./openrouter";
 
 /**
  * PodcastAdRemovalService - AI-powered podcast ad detection and removal
@@ -76,7 +76,7 @@ export async function isAdRemovalAvailable(): Promise<boolean> {
         return false;
     }
 
-    if (!config.openrouter.apiKey) {
+    if (!(await openRouterService.getApiKey())) {
         console.log("[AD-REMOVAL] OpenRouter API key not configured");
         return false;
     }
@@ -308,6 +308,7 @@ Respond with ONLY the JSON array, no markdown or explanation.
 ${formattedTranscript}`;
 
     try {
+        const apiKey = await openRouterService.getApiKey();
         const response = await axios.post(
             "https://openrouter.ai/api/v1/chat/completions",
             {
@@ -318,7 +319,7 @@ ${formattedTranscript}`;
             },
             {
                 headers: {
-                    "Authorization": `Bearer ${config.openrouter.apiKey}`,
+                    "Authorization": `Bearer ${apiKey}`,
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://lidify.app",
                     "X-Title": "Lidify Podcast Ad Removal",

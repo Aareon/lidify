@@ -23,12 +23,12 @@ function safeDecrypt(value: string | null): string | null {
 }
 
 // GET /system-settings/openrouter-status
-// Returns whether OpenRouter is configured (API key is set via environment variable)
+// Returns whether OpenRouter is configured (key set in System Settings OR via env var)
 // This endpoint is BEFORE auth middleware so the settings page can check availability
 router.get("/openrouter-status", async (req, res) => {
     const { openRouterService } = await import("../services/openrouter");
     res.json({
-        configured: openRouterService.isConfigured(),
+        configured: await openRouterService.isAvailable(),
     });
 });
 
@@ -103,8 +103,9 @@ const systemSettingsSchema = z.object({
     lidarrApiKey: z.string().nullable().optional(),
     lidarrQualityProfileId: z.number().nullable().optional(),
 
-    // AI Services (API key set via OPENROUTER_API_KEY environment variable)
+    // AI Services. openrouterApiKey overrides the OPENROUTER_API_KEY env var when set.
     openrouterModel: z.string().optional(),
+    openrouterApiKey: z.string().nullable().optional(),
 
     fanartEnabled: z.boolean().optional(),
     fanartApiKey: z.string().nullable().optional(),
@@ -172,7 +173,6 @@ router.get("/", async (req, res) => {
 
         // Decrypt sensitive fields before sending to client
         // Use safeDecrypt to handle corrupted encrypted values gracefully
-        // Note: openrouterApiKey is NOT sent - it's only configured via OPENROUTER_API_KEY env var
         const decryptedSettings = {
             ...settings,
             lidarrApiKey: safeDecrypt(settings.lidarrApiKey),
@@ -180,6 +180,7 @@ router.get("/", async (req, res) => {
             audiobookshelfApiKey: safeDecrypt(settings.audiobookshelfApiKey),
             soulseekPassword: safeDecrypt(settings.soulseekPassword),
             spotifyClientSecret: safeDecrypt(settings.spotifyClientSecret),
+            openrouterApiKey: safeDecrypt(settings.openrouterApiKey),
         };
 
         res.json(decryptedSettings);
@@ -201,7 +202,6 @@ router.post("/", async (req, res) => {
         );
 
         // Encrypt sensitive fields
-        // Note: openrouterApiKey is NOT stored - it's only configured via OPENROUTER_API_KEY env var
         const encryptedData: any = { ...data };
 
         if (data.lidarrApiKey)
@@ -216,6 +216,12 @@ router.post("/", async (req, res) => {
             encryptedData.soulseekPassword = encrypt(data.soulseekPassword);
         if (data.spotifyClientSecret)
             encryptedData.spotifyClientSecret = encrypt(data.spotifyClientSecret);
+        // openrouterApiKey: encrypt a new value; null explicitly clears it (revert
+        // to the OPENROUTER_API_KEY env var). Empty string is treated as "clear".
+        if (data.openrouterApiKey)
+            encryptedData.openrouterApiKey = encrypt(data.openrouterApiKey);
+        else if (data.openrouterApiKey === null || data.openrouterApiKey === "")
+            encryptedData.openrouterApiKey = null;
 
         const settings = await prisma.systemSettings.upsert({
             where: { id: "default" },
@@ -472,17 +478,19 @@ router.post("/test-lidarr", async (req, res) => {
 });
 
 // POST /system-settings/test-openrouter
-// Tests the OpenRouter connection using the OPENROUTER_API_KEY environment variable
+// Tests the OpenRouter connection. Uses an apiKey from the request body when
+// provided (so an unsaved key can be tested), otherwise the resolved key
+// (System Settings value, falling back to the OPENROUTER_API_KEY env var).
 router.post("/test-openrouter", async (req, res) => {
     try {
-        const { config } = await import("../config");
-        const { model } = req.body;
+        const { model, apiKey: bodyApiKey } = req.body;
 
-        const apiKey = config.openrouter.apiKey;
+        const { openRouterService } = await import("../services/openrouter");
+        const apiKey = (bodyApiKey && String(bodyApiKey).trim()) || (await openRouterService.getApiKey());
         if (!apiKey) {
             return res.status(400).json({
                 error: "OpenRouter API key not configured",
-                details: "Set OPENROUTER_API_KEY environment variable"
+                details: "Enter a key in System Settings or set the OPENROUTER_API_KEY environment variable"
             });
         }
 

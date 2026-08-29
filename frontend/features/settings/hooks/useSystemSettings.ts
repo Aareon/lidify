@@ -157,8 +157,12 @@ export function useSystemSettings() {
                     );
                     break;
                 case "openrouter":
-                    // API key is from environment variable, only send model
-                    result = await api.testOpenRouter(systemSettings.openrouterModel);
+                    // Pass the (possibly unsaved) key so it can be tested before saving;
+                    // the server falls back to the saved key / env var when omitted.
+                    result = await api.testOpenRouter(
+                        systemSettings.openrouterModel,
+                        systemSettings.openrouterApiKey || undefined
+                    );
                     break;
                 case "fanart":
                     result = await api.testFanart(systemSettings.fanartApiKey);
