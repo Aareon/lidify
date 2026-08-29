@@ -119,6 +119,8 @@ export function MiniPlayer() {
     const [optimisticRemoteVolume, setOptimisticRemoteVolume] = useState<number | null>(null);
     const touchStartX = useRef<number | null>(null);
     const lastMediaIdRef = useRef<string | null>(null);
+    // Remember the level before muting so unmute restores it (instead of jumping to 100%).
+    const lastNonZeroVolumeRef = useRef(0.5);
 
     const isControllingRemote = !isActivePlayer && !!activePlayerState;
 
@@ -453,7 +455,29 @@ export function MiniPlayer() {
                     )}
                 >
                     <div className="flex items-center gap-3 px-4 py-2 bg-black/20">
-                        <VolumeX className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                const muted = displayVolume === 0;
+                                if (!muted && displayVolume > 0) {
+                                    lastNonZeroVolumeRef.current = displayVolume;
+                                }
+                                const nextVol = muted
+                                    ? lastNonZeroVolumeRef.current || 0.5
+                                    : 0;
+                                if (isControllingRemote) setOptimisticRemoteVolume(nextVol);
+                                setVolume(nextVol);
+                            }}
+                            className="flex-shrink-0 text-gray-400 hover:text-white transition-colors"
+                            title={displayVolume === 0 ? "Unmute" : "Mute"}
+                            aria-label={displayVolume === 0 ? "Unmute" : "Mute"}
+                        >
+                            {displayVolume === 0 ? (
+                                <VolumeX className="w-4 h-4" />
+                            ) : (
+                                <Volume2 className="w-4 h-4" />
+                            )}
+                        </button>
                         <input
                             type="range"
                             min="0"

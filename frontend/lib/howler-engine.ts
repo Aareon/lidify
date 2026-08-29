@@ -60,6 +60,13 @@ class HowlerEngine {
     private pendingAutoplay: boolean = false; // Track pending autoplay for retries
     private lastFormat: string | undefined; // Store format for retries
     private readonly popFadeMs: number = 10; // ms - micro-fade to reduce click/pop on track changes
+    // Perceptual volume taper. `this.state.volume` stays LINEAR 0..1 (the slider
+    // position the UI shows), but the gain actually applied to audio is
+    // volume^exponent. Loudness is perceived roughly logarithmically, so a linear
+    // slider feels "loud until the very bottom"; the taper spreads genuinely quiet
+    // (background-music) levels across the lower half of the slider instead. All
+    // gain application goes through effectiveGain(), which also forces 0 when muted.
+    private readonly volumeCurveExponent: number = 2.5;
     private shouldRetryLoads: boolean = false; // Only retry transient load errors where it helps (Android WebView)
     private cleanupTimeoutId: NodeJS.Timeout | null = null; // Track cleanup timeout to prevent race conditions
     
@@ -182,7 +189,7 @@ class HowlerEngine {
             html5: isPodcastOrAudiobook || !isAndroidWebView, // HTML5 for podcasts/audiobooks OR non-Android
             autoplay: false, // We'll handle autoplay manually
             preload: true,
-            volume: this.state.isMuted ? 0 : this.state.volume,
+            volume: this.effectiveGain(),
             pool: 1, // Only allow one sound instance to prevent echo/double playback
             // On Android WebView, increase the xhr timeout
             ...(isAndroidWebView && { xhr: { timeout: 30000 } }),
@@ -501,9 +508,8 @@ class HowlerEngine {
         // Mark as user-initiated for autoplay recovery
         this.userInitiatedPlay = true;
 
-        // Ensure volume is set correctly before playing
-        const targetVolume = this.state.isMuted ? 0 : this.state.volume;
-        this.howl.volume(targetVolume);
+        // Ensure volume is set correctly before playing (perceptual taper + mute)
+        this.howl.volume(this.effectiveGain());
         
         // Always call play() without sound ID - let Howler manage it
         // Using specific sound IDs was causing issues with newly created Howl instances
@@ -591,27 +597,47 @@ class HowlerEngine {
     }
 
     /**
-     * Set volume (0-1)
+     * Convert a linear slider value (0..1) to a perceptual gain.
+     */
+    private taperVolume(v: number): number {
+        const clamped = Math.max(0, Math.min(1, v));
+        return Math.pow(clamped, this.volumeCurveExponent);
+    }
+
+    /**
+     * The actual gain to apply to the audio element: the tapered volume, or 0
+     * when muted. Single source of truth for every place we set howl volume.
+     */
+    private effectiveGain(): number {
+        return this.state.isMuted ? 0 : this.taperVolume(this.state.volume);
+    }
+
+    /**
+     * Apply the current effective gain to the active howl (if any).
+     */
+    private applyGain(): void {
+        if (this.howl) {
+            this.howl.volume(this.effectiveGain());
+        }
+    }
+
+    /**
+     * Set volume (0-1, linear slider value). Stored linearly; the perceptual
+     * taper and mute are applied via effectiveGain().
      */
     setVolume(volume: number): void {
         this.state.volume = Math.max(0, Math.min(1, volume));
-
-        if (this.howl && !this.state.isMuted) {
-            this.howl.volume(this.state.volume);
-        }
-
+        this.applyGain();
         this.emit("volume", { volume: this.state.volume });
     }
 
     /**
-     * Mute/unmute
+     * Mute/unmute. effectiveGain() returns 0 while muted, so this is authoritative
+     * for the active howl; new/preloaded howls also read effectiveGain() at build.
      */
     setMuted(muted: boolean): void {
         this.state.isMuted = muted;
-
-        if (this.howl) {
-            this.howl.volume(muted ? 0 : this.state.volume);
-        }
+        this.applyGain();
     }
 
     /**
