@@ -97,8 +97,19 @@ export function normalizeArtistName(name: string): string {
     
     // Normalize multiple spaces to single space
     normalized = normalized.replace(/\s+/g, ' ');
-    
+
     return normalized.trim();
+}
+
+/**
+ * A punctuation- and whitespace-insensitive key for detecting artists that are
+ * the same but tagged slightly differently — e.g. "J. Cole" vs "J Cole", or
+ * "M.I.A." vs "MIA". Builds on normalizeArtistName (lowercase, diacritics, &→and)
+ * then removes every non-alphanumeric character. Use for duplicate consolidation,
+ * NOT for display — it is lossy. Returns "" for names with no alphanumerics.
+ */
+export function looseArtistKey(name: string): string {
+    return normalizeArtistName(name).replace(/[^a-z0-9]/g, "");
 }
 
 /**

@@ -15,6 +15,18 @@ import { prisma } from "../utils/db";
 import { config } from "../config";
 import * as fs from "fs";
 import * as path from "path";
+import { normalizeArtistName, looseArtistKey } from "../utils/artistNormalization";
+
+/**
+ * Choose the better display name for a surviving merged artist. Prefers proper
+ * casing and meaningful punctuation, so "J. Cole" wins over "J Cole". On a tie
+ * keeps the first argument (the surviving real-MBID artist's existing name).
+ */
+function pickBetterArtistName(current: string, candidate: string): string {
+    const score = (n: string) =>
+        (/[A-Z]/.test(n) ? 2 : 0) + (/[.\-'&/]/.test(n) ? 1 : 0);
+    return score(candidate) > score(current) ? candidate : current;
+}
 
 interface IntegrityReport {
     expiredExclusions: number;
@@ -282,32 +294,64 @@ export async function runDataIntegrityCheck(): Promise<IntegrityReport> {
         );
     }
 
-    // 7. Consolidate duplicate artists (same name, one with temp MBID, one with real)
+    // 7. Consolidate duplicate artists: a placeholder (temp-MBID) row and a
+    // real-MBID row that are the same artist. Matches on a punctuation/whitespace-
+    // insensitive key (looseArtistKey) so splits differing only by a period or
+    // spacing — "J. Cole" vs "J Cole" — are caught, which the old exact
+    // normalizedName match missed. Migrates albums AND OwnedAlbum rows (which
+    // cascade-delete with the artist, so they must move first or the merged
+    // albums silently lose "owned" status), and keeps the better display name.
     const tempArtists = await prisma.artist.findMany({
-        where: {
-            mbid: { startsWith: "temp-" },
-        },
+        where: { mbid: { startsWith: "temp-" } },
         include: { albums: true },
     });
 
-    for (const tempArtist of tempArtists) {
-        // Find a real artist with the same normalized name
-        const realArtist = await prisma.artist.findFirst({
-            where: {
-                normalizedName: tempArtist.normalizedName,
-                mbid: { not: { startsWith: "temp-" } },
-            },
-        });
+    // Load real-MBID artists once and index them by loose key.
+    const realArtists = await prisma.artist.findMany({
+        where: { mbid: { not: { startsWith: "temp-" } } },
+        select: { id: true, name: true },
+    });
+    const realByKey = new Map<string, { id: string; name: string }>();
+    for (const r of realArtists) {
+        const key = looseArtistKey(r.name);
+        if (key && !realByKey.has(key)) realByKey.set(key, r);
+    }
 
-        if (realArtist) {
-            // Move all albums from temp artist to real artist
-            await prisma.album.updateMany({
+    for (const tempArtist of tempArtists) {
+        const key = looseArtistKey(tempArtist.name);
+        if (!key) continue;
+
+        const realArtist = realByKey.get(key);
+        if (!realArtist) continue;
+
+        const bestName = pickBetterArtistName(realArtist.name, tempArtist.name);
+
+        await prisma.$transaction(async (tx) => {
+            // Move albums to the real artist
+            await tx.album.updateMany({
                 where: { artistId: tempArtist.id },
                 data: { artistId: realArtist.id },
             });
 
-            // Delete SimilarArtist relations
-            await prisma.similarArtist.deleteMany({
+            // Migrate ownership rows. OwnedAlbum PK is (artistId, rgMbid); drop any
+            // temp rows that would collide with an existing real row, then move the rest.
+            const realOwned = await tx.ownedAlbum.findMany({
+                where: { artistId: realArtist.id },
+                select: { rgMbid: true },
+            });
+            const realRgMbids = realOwned.map((o) => o.rgMbid);
+            if (realRgMbids.length > 0) {
+                await tx.ownedAlbum.deleteMany({
+                    where: { artistId: tempArtist.id, rgMbid: { in: realRgMbids } },
+                });
+            }
+            await tx.ownedAlbum.updateMany({
+                where: { artistId: tempArtist.id },
+                data: { artistId: realArtist.id },
+            });
+
+            // Drop SimilarArtist relations referencing the temp artist (they regenerate)
+            await tx.similarArtist.deleteMany({
                 where: {
                     OR: [
                         { fromArtistId: tempArtist.id },
@@ -316,16 +360,25 @@ export async function runDataIntegrityCheck(): Promise<IntegrityReport> {
                 },
             });
 
-            // Delete temp artist
-            await prisma.artist.delete({
-                where: { id: tempArtist.id },
-            });
+            // Delete the temp artist (OwnedAlbum cascade is now harmless — none remain)
+            await tx.artist.delete({ where: { id: tempArtist.id } });
 
-            report.consolidatedArtists++;
-            console.log(
-                `     Consolidated "${tempArtist.name}" (temp) into real artist`
-            );
-        }
+            // Adopt the better display name on the surviving real-MBID artist
+            if (bestName !== realArtist.name) {
+                await tx.artist.update({
+                    where: { id: realArtist.id },
+                    data: {
+                        name: bestName,
+                        normalizedName: normalizeArtistName(bestName),
+                    },
+                });
+            }
+        });
+
+        report.consolidatedArtists++;
+        console.log(
+            `     Consolidated "${tempArtist.name}" (temp) into "${bestName}" (real MBID)`
+        );
     }
 
     // 8. Clean up orphaned artists (no albums)
