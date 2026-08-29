@@ -17,7 +17,10 @@ export type HowlerEventType =
     | "load"
     | "loaderror"
     | "playerror"
-    | "timeupdate";
+    | "timeupdate"
+    // Emitted when the engine advances to a preloaded next track on its own
+    // (gapless / background-safe advancement), so React can sync its pointer.
+    | "trackadvanced";
 
 export type HowlerEventCallback = (data?: unknown) => void;
 
@@ -65,6 +68,16 @@ class HowlerEngine {
     private seekTargetTime: number | null = null;
     private seekTimeoutId: NodeJS.Timeout | null = null;
 
+    // Preloaded next track (for gapless + background-safe advancement).
+    // While the current track plays, we fetch the next one into a second Howl so
+    // that when the current ends we can promote+play it imperatively inside the
+    // engine's own "end" callback — without waiting on a React re-render, which
+    // Android throttles to a halt when the PWA is backgrounded / screen off.
+    private nextHowl: Howl | null = null;
+    private nextSrc: string | null = null;
+    private nextFormat: string | undefined;
+    private nextTrackId: string | null = null;
+
     constructor() {
         // Initialize event listener maps
         const events: HowlerEventType[] = [
@@ -78,6 +91,7 @@ class HowlerEngine {
             "loaderror",
             "playerror",
             "timeupdate",
+            "trackadvanced",
         ];
         events.forEach((event) => this.eventListeners.set(event, new Set()));
     }
@@ -107,6 +121,13 @@ class HowlerEngine {
             return;
         }
 
+        // A fresh load (manual skip, new queue, etc.) supersedes any preloaded
+        // next track — it may no longer be the right one. Preloading is only used
+        // by the autonomous end-of-track advance (handleActiveEnd), which is the
+        // path that must survive the PWA being backgrounded; manual loads take the
+        // normal async path here. cleanup() also clears the preload defensively.
+        this.clearPreload();
+
         // Set loading guard immediately
         this.isLoading = true;
 
@@ -116,32 +137,8 @@ class HowlerEngine {
 
         this.state.currentSrc = src;
 
-        // Detect if running in Android WebView (for graceful degradation)
-        const isAndroidWebView =
-            typeof navigator !== "undefined" &&
-            /wv/.test(navigator.userAgent.toLowerCase()) &&
-            /android/.test(navigator.userAgent.toLowerCase());
-        this.shouldRetryLoads = isAndroidWebView;
-
-        // Check if this is a podcast/audiobook stream (they need HTML5 Audio for Range request support)
-        const isPodcastOrAudiobook =
-            src.includes("/api/podcasts/") || src.includes("/api/audiobooks/");
-
-        // Build Howl config
-        // Note: On Android WebView, HTML5 Audio causes crackling/popping on track changes
-        // Use Web Audio API on Android for smoother playback (trades streaming for quality)
-        // EXCEPTION: Podcasts always use HTML5 Audio because they need Range request support
-        // for seeking in large files. Web Audio would try to download the entire ~100MB file.
-        const howlConfig = {
-            src: [src],
-            html5: isPodcastOrAudiobook || !isAndroidWebView, // HTML5 for podcasts/audiobooks OR non-Android
-            autoplay: false, // We'll handle autoplay manually
-            preload: true,
-            volume: this.state.isMuted ? 0 : this.state.volume,
-            pool: 1, // Only allow one sound instance to prevent echo/double playback
-            // On Android WebView, increase the xhr timeout
-            ...(isAndroidWebView && { xhr: { timeout: 30000 } }),
-        } as HowlOptions;
+        // On Android WebView, retry transient load errors (see createHowl).
+        this.shouldRetryLoads = this.isAndroidWebView();
 
         // Store for potential retry
         this.pendingAutoplay = autoplay;
@@ -152,26 +149,82 @@ class HowlerEngine {
             this.retryCount = 0;
         }
 
+        console.log(`[HowlerEngine] Creating new Howl instance for: ${src.substring(0, 80)}...`);
+
+        // Build and activate the Howl. autoplay is honored inside onload.
+        this.createHowl(src, format, autoplay, "active");
+    }
+
+    /**
+     * Detect Android System WebView (embedded in a native app). A browser's own
+     * PWA / standalone context is NOT a WebView and does not match here.
+     */
+    private isAndroidWebView(): boolean {
+        return (
+            typeof navigator !== "undefined" &&
+            /wv/.test(navigator.userAgent.toLowerCase()) &&
+            /android/.test(navigator.userAgent.toLowerCase())
+        );
+    }
+
+    /**
+     * Build the Howl options shared by the active track and the preloaded next
+     * track. HTML5 Audio is used except on Android WebView for music (where it
+     * caused crackling); podcasts/audiobooks always use HTML5 for Range/seek.
+     */
+    private buildHowlConfig(src: string, format?: string): HowlOptions {
+        const isAndroidWebView = this.isAndroidWebView();
+        const isPodcastOrAudiobook =
+            src.includes("/api/podcasts/") || src.includes("/api/audiobooks/");
+
+        const config = {
+            src: [src],
+            html5: isPodcastOrAudiobook || !isAndroidWebView, // HTML5 for podcasts/audiobooks OR non-Android
+            autoplay: false, // We'll handle autoplay manually
+            preload: true,
+            volume: this.state.isMuted ? 0 : this.state.volume,
+            pool: 1, // Only allow one sound instance to prevent echo/double playback
+            // On Android WebView, increase the xhr timeout
+            ...(isAndroidWebView && { xhr: { timeout: 30000 } }),
+        } as HowlOptions;
+
         // Add format hints (required for URLs without file extensions)
-        // Include multiple formats as fallbacks - browser will try them in order
         if (format) {
-            // Put the expected format first, then common fallbacks
             const formats = [format];
             if (!formats.includes("mp3")) formats.push("mp3");
             if (!formats.includes("flac")) formats.push("flac");
             if (!formats.includes("mp4")) formats.push("mp4");
             if (!formats.includes("webm")) formats.push("webm");
-            howlConfig.format = formats;
+            config.format = formats;
         } else {
-            // Default format order if none specified
-            howlConfig.format = ["mp3", "flac", "mp4", "webm", "wav"];
+            config.format = ["mp3", "flac", "mp4", "webm", "wav"];
         }
 
-        console.log(`[HowlerEngine] Creating new Howl instance for: ${src.substring(0, 80)}...`);
-        
-        this.howl = new Howl({
-            ...howlConfig,
+        return config;
+    }
+
+    /**
+     * Create a Howl for either the active track or the preloaded next track.
+     * Every callback that mutates current-playback state is guarded with
+     * `this.howl !== howl`, so a preloaded (inactive) instance can never disturb
+     * the track that is currently playing. When a preloaded instance is later
+     * promoted (this.howl = it), those same callbacks light up for it.
+     */
+    private createHowl(
+        src: string,
+        format: string | undefined,
+        autoplay: boolean,
+        role: "active" | "preload"
+    ): Howl {
+        const config = this.buildHowlConfig(src, format);
+
+        const howl = new Howl({
+            ...config,
             onload: () => {
+                if (this.howl !== howl) {
+                    // Preloaded instance finished fetching; stays inert until promoted.
+                    return;
+                }
                 console.log(`[HowlerEngine] Loaded: ${this.state.currentSrc?.substring(0, 80)}...`);
                 this.isLoading = false;
                 this.isChangingTrack = false; // Clear flag only after successful load
@@ -183,6 +236,13 @@ class HowlerEngine {
                 }
             },
             onloaderror: (id, error) => {
+                if (this.howl !== howl) {
+                    // A preloaded next track failed to fetch. Discard it and keep the
+                    // current track playing; advancement falls back to a normal load.
+                    console.warn("[HowlerEngine] Preloaded next track failed to load; discarding");
+                    if (this.nextHowl === howl) this.clearPreload();
+                    return;
+                }
                 console.error(
                     "[HowlerEngine] Load error:",
                     error,
@@ -230,12 +290,13 @@ class HowlerEngine {
                 this.emit("loaderror", { error });
             },
             onplayerror: (id, error) => {
+                if (this.howl !== howl) return;
                 // Ignore errors during track changes - they're stale from the old Howl
                 if (this.isChangingTrack) {
                     console.log("[HowlerEngine] Ignoring play error during track change");
                     return;
                 }
-                
+
                 console.error("[HowlerEngine] Play error:", error);
                 // Clear playing state so UI shows play button
                 this.state.isPlaying = false;
@@ -244,9 +305,9 @@ class HowlerEngine {
                 this.stopTimeUpdates();
                 this.emit("playerror", { error });
                 // Don't try to auto-recover - let the user click play again
-                // The 'unlock' mechanism requires a NEW user interaction which won't happen automatically
             },
             onplay: () => {
+                if (this.howl !== howl) return;
                 const sounds = this.getInternalHowl()?._sounds;
                 console.log(
                     `[HowlerEngine] onplay event fired, sounds count: ${sounds?.length || 0}`
@@ -258,6 +319,7 @@ class HowlerEngine {
                 this.emit("play");
             },
             onpause: () => {
+                if (this.howl !== howl) return;
                 this.state.isPlaying = false;
                 this.pendingPlay = false; // Clear pending flag
                 this.userInitiatedPlay = false;
@@ -265,6 +327,7 @@ class HowlerEngine {
                 this.emit("pause");
             },
             onstop: () => {
+                if (this.howl !== howl) return;
                 this.state.isPlaying = false;
                 this.pendingPlay = false; // Clear pending flag
                 this.state.currentTime = 0;
@@ -272,17 +335,136 @@ class HowlerEngine {
                 this.emit("stop");
             },
             onend: () => {
-                this.state.isPlaying = false;
-                this.stopTimeUpdates();
-                this.emit("end");
+                if (this.howl !== howl) return;
+                this.handleActiveEnd();
             },
             onseek: () => {
-                if (this.howl) {
-                    this.state.currentTime = this.howl.seek() as number;
-                    this.emit("seek", { time: this.state.currentTime });
-                }
+                if (this.howl !== howl) return;
+                this.state.currentTime = this.howl.seek() as number;
+                this.emit("seek", { time: this.state.currentTime });
             },
         });
+
+        // Assign synchronously so the guards above resolve correctly. Howler fires
+        // these callbacks asynchronously, so this runs before any of them.
+        if (role === "active") {
+            this.howl = howl;
+        } else {
+            this.nextHowl = howl;
+        }
+
+        return howl;
+    }
+
+    /**
+     * Handle the active track reaching its end. If a next track has been
+     * preloaded, promote and play it right here (no React round-trip, so it works
+     * when the PWA is backgrounded); otherwise emit "end" for React to advance.
+     */
+    private handleActiveEnd(): void {
+        this.state.isPlaying = false;
+        this.stopTimeUpdates();
+
+        if (this.nextHowl && this.nextSrc) {
+            // Autonomous advance (track ended on its own). Promote+play the
+            // preloaded track, then tell React to sync its queue pointer.
+            const advancedTrackId = this.promoteNextAsActive(true);
+            this.emit("trackadvanced", { trackId: advancedTrackId });
+        } else {
+            this.emit("end");
+        }
+    }
+
+    /**
+     * Promote the preloaded next Howl to the active track and (optionally) play
+     * it immediately. Returns the promoted track id. Does NOT emit
+     * "trackadvanced" — the caller decides whether React needs to sync (it does
+     * for an autonomous end-of-track advance, but not for a React-driven load()
+     * promotion where React already knows the current track).
+     */
+    private promoteNextAsActive(autoplay: boolean): string | null {
+        if (!this.nextHowl || !this.nextSrc) return null;
+
+        const promoted = this.nextHowl;
+        const promotedSrc = this.nextSrc;
+        const promotedFormat = this.nextFormat;
+        const promotedTrackId = this.nextTrackId;
+
+        // Detach preload refs first so the outgoing howl's guarded stop/unload
+        // callbacks see `this.howl` already pointing at the promoted instance.
+        this.nextHowl = null;
+        this.nextSrc = null;
+        this.nextFormat = undefined;
+        this.nextTrackId = null;
+
+        const old = this.howl;
+        this.howl = promoted;
+        this.state.currentSrc = promotedSrc;
+        this.state.currentTime = 0;
+        this.state.duration = promoted.duration() || 0;
+        this.state.isPlaying = false;
+        this.pendingPlay = false;
+        this.isLoading = false;
+        this.isChangingTrack = false;
+        this.retryCount = 0;
+        this.pendingAutoplay = autoplay;
+        this.lastFormat = promotedFormat;
+        this.shouldRetryLoads = this.isAndroidWebView();
+
+        // Tear down the finished/previous track. Its guarded callbacks no-op now.
+        if (old && old !== promoted) {
+            try {
+                old.stop();
+                old.unload();
+            } catch {
+                // ignore
+            }
+        }
+
+        console.log(`[HowlerEngine] Promoted preloaded track: ${promotedSrc.substring(0, 80)}...`);
+        this.emit("load", { duration: this.state.duration });
+
+        if (autoplay) {
+            this.play();
+        }
+
+        return promotedTrackId;
+    }
+
+    /**
+     * Preload the next queued track into a second Howl so it can be promoted
+     * instantly (gapless, and without a background-throttled React load) when the
+     * current track ends. No-op if it is already the current or preloaded src.
+     */
+    preloadNext(src: string, format?: string, trackId?: string | null): void {
+        if (!src) return;
+        if (src === this.state.currentSrc) return;
+        if (src === this.nextSrc && this.nextHowl) return;
+
+        this.clearPreload();
+        this.nextSrc = src;
+        this.nextFormat = format;
+        this.nextTrackId = trackId ?? null;
+        console.log(`[HowlerEngine] Preloading next track: ${src.substring(0, 80)}...`);
+        this.createHowl(src, format, false, "preload");
+    }
+
+    /**
+     * Discard any preloaded next track.
+     */
+    clearPreload(): void {
+        if (this.nextHowl) {
+            try {
+                this.nextHowl.stop();
+                this.nextHowl.unload();
+            } catch {
+                // ignore
+            }
+        }
+        this.nextHowl = null;
+        this.nextSrc = null;
+        this.nextFormat = undefined;
+        this.nextTrackId = null;
     }
 
     /**
@@ -591,8 +773,11 @@ class HowlerEngine {
         
         // Mark that we're changing tracks - this suppresses stale errors from the old Howl
         this.isChangingTrack = true;
-        
+
         this.stopTimeUpdates();
+
+        // Any preloaded next track belongs to the outgoing context; drop it.
+        this.clearPreload();
 
         // Cancel any pending cleanup timeout to prevent race conditions
         if (this.cleanupTimeoutId) {

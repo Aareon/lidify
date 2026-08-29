@@ -1,6 +1,6 @@
 "use client";
 
-import { useAudioState } from "@/lib/audio-state-context";
+import { useAudioState, type Track } from "@/lib/audio-state-context";
 import { useAudioPlayback } from "@/lib/audio-playback-context";
 import { useAudioControls } from "@/lib/audio-controls-context";
 import { useRemotePlayback } from "@/lib/remote-playback-context";
@@ -55,6 +55,8 @@ export const HowlerAudioElement = memo(function HowlerAudioElement() {
         setCurrentSource,
         queue,
         currentIndex,
+        isShuffle,
+        shuffleIndices,
     } = useAudioState();
 
     // Playback context
@@ -198,6 +200,18 @@ export const HowlerAudioElement = memo(function HowlerAudioElement() {
             }
         };
 
+        // The engine advanced to a preloaded next track on its own (gapless /
+        // background-safe). Sync React's queue pointer. Setting lastTrackIdRef to
+        // the already-playing track makes the load effect treat it as the current
+        // track (no reload). Only fires for music tracks (only they are preloaded).
+        const handleTrackAdvanced = (data: { trackId?: string | null }) => {
+            if (playbackType !== "track") return;
+            if (data?.trackId) {
+                lastTrackIdRef.current = data.trackId;
+            }
+            next();
+        };
+
         // Handle LOAD errors (network issues, 404, corrupt audio) - advance to next track
         const handleLoadError = (data: { error: unknown }) => {
             console.error("[HowlerAudioElement] Load error:", data.error);
@@ -332,6 +346,7 @@ export const HowlerAudioElement = memo(function HowlerAudioElement() {
         howlerEngine.on("timeupdate", handleTimeUpdate);
         howlerEngine.on("load", handleLoad);
         howlerEngine.on("end", handleEnd);
+        howlerEngine.on("trackadvanced", handleTrackAdvanced);
         howlerEngine.on("loaderror", handleLoadError);
         howlerEngine.on("playerror", handlePlayError);
         howlerEngine.on("play", handlePlay);
@@ -341,6 +356,7 @@ export const HowlerAudioElement = memo(function HowlerAudioElement() {
             howlerEngine.off("timeupdate", handleTimeUpdate);
             howlerEngine.off("load", handleLoad);
             howlerEngine.off("end", handleEnd);
+            howlerEngine.off("trackadvanced", handleTrackAdvanced);
             howlerEngine.off("loaderror", handleLoadError);
             howlerEngine.off("playerror", handlePlayError);
             howlerEngine.off("play", handlePlay);
@@ -672,6 +688,74 @@ export const HowlerAudioElement = memo(function HowlerAudioElement() {
         loadAudio();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- canSeek/isPlaying are playback state, not load dependencies
     }, [currentTrack, currentAudiobook, currentPodcast, playbackType, setDuration, setCurrentSource, next, clearLoadWatchdogTimeout, startLoadWatchdogTimeout, clearTrackedLoadListeners]);
+
+    // Preload the next queued track into the engine so it can advance gaplessly
+    // AND while backgrounded (screen off), where React effects are throttled and
+    // cannot drive the next load. Runs after the load effect above, so a track
+    // change loads the current track (clearing any stale preload) before we set
+    // the new one. Only local-file tracks are preloaded (synchronous URL); a
+    // YouTube/no-file next track is left to the normal foreground load path.
+    useEffect(() => {
+        // Never preload when this device isn't the one actually playing audio.
+        if (controlMode === "remote" || !isActivePlayer) return;
+        if (playbackType !== "track" || !currentTrack) return;
+
+        // Mirror next()'s index selection (minus repeat-one, which replays the
+        // current track and needs no cross-track preload).
+        const peekNextTrack = (): Track | null => {
+            if (queue.length === 0 || repeatMode === "one") return null;
+            let nextIndex: number;
+            if (isShuffle) {
+                const pos = shuffleIndices.indexOf(currentIndex);
+                if (pos < shuffleIndices.length - 1) {
+                    nextIndex = shuffleIndices[pos + 1];
+                } else if (repeatMode === "all") {
+                    nextIndex = shuffleIndices[0];
+                } else {
+                    return null;
+                }
+            } else {
+                if (currentIndex < queue.length - 1) {
+                    nextIndex = currentIndex + 1;
+                } else if (repeatMode === "all") {
+                    nextIndex = 0;
+                } else {
+                    return null;
+                }
+            }
+            return queue[nextIndex] ?? null;
+        };
+
+        const nextTrack = peekNextTrack();
+        // Only local files have a synchronous stream URL we can preload cheaply.
+        if (!nextTrack || !nextTrack.filePath) {
+            howlerEngine.clearPreload();
+            return;
+        }
+
+        let format = "mp3";
+        const ext = nextTrack.filePath.split(".").pop()?.toLowerCase();
+        if (ext === "flac") format = "flac";
+        else if (ext === "m4a" || ext === "aac") format = "mp4";
+        else if (ext === "ogg" || ext === "opus") format = "webm";
+        else if (ext === "wav") format = "wav";
+
+        howlerEngine.preloadNext(
+            api.getStreamUrl(nextTrack.id),
+            format,
+            nextTrack.id
+        );
+    }, [
+        currentTrack,
+        queue,
+        currentIndex,
+        isShuffle,
+        shuffleIndices,
+        repeatMode,
+        playbackType,
+        controlMode,
+        isActivePlayer,
+    ]);
 
     // Check podcast cache status and control canSeek
     useEffect(() => {
