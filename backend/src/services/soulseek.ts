@@ -244,6 +244,10 @@ class SoulseekService {
     // engine. See slskdClient + the slskd* helpers below.
     private client: any = null;
     private connecting = false;
+    // Push Lidify's DB config (creds + upload limits + the _incoming download
+    // subdirectory) into slskd once per process, so downloads land in a
+    // deterministic place without the admin having to re-save credentials.
+    private configSynced = false;
     private connectPromise: Promise<void> | null = null;
     private lastConnectAttempt = 0;
     private readonly RECONNECT_COOLDOWN = 30000; // 30 seconds between reconnect attempts
@@ -496,6 +500,7 @@ class SoulseekService {
         if (!(await slskdClient.isReachable())) {
             throw new Error("slskd sidecar not reachable");
         }
+        await this.ensureSlskdConfigured();
         try {
             const state = await slskdClient.getServerState();
             if (!(state.isConnected && state.isLoggedIn)) {
@@ -504,6 +509,35 @@ class SoulseekService {
         } catch {
             // Reachable but state check failed — let the caller proceed and fail
             // on the actual search/download if truly disconnected.
+        }
+    }
+
+    /**
+     * One-time (per process) reconciliation of slskd's config from Lidify's DB:
+     * credentials + upload slots/speed + the fixed `_incoming` download
+     * subdirectory. Ensures downloads land deterministically even if the admin
+     * hasn't re-saved credentials since the slskd cutover. Best-effort.
+     */
+    private async ensureSlskdConfigured(): Promise<void> {
+        if (this.configSynced) return;
+        this.configSynced = true; // set first to avoid concurrent double-apply
+        try {
+            const settings = await getSystemSettings();
+            if (settings?.soulseekUsername && settings?.soulseekPassword) {
+                await slskdClient.applyConfig({
+                    username: settings.soulseekUsername,
+                    password: settings.soulseekPassword,
+                    uploadSlots: settings.soulseekUploadSlots,
+                    uploadSpeedLimitKbps: settings.soulseekUploadSpeedLimitKbps,
+                });
+                sessionLog(
+                    "SOULSEEK",
+                    "Synced slskd config from settings (creds, upload limits, _incoming)"
+                );
+            }
+        } catch {
+            // Allow a retry on the next call if the sync failed.
+            this.configSynced = false;
         }
     }
 
@@ -589,45 +623,86 @@ class SoulseekService {
     /**
      * Recursively find the newest file matching `base` (basename) under `dir`.
      */
-    private findFileByBasename(dir: string, base: string): string | null {
-        let best: { p: string; m: number } | null = null;
-        try {
-            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-                const p = path.join(dir, e.name);
-                if (e.isDirectory()) {
-                    const r = this.findFileByBasename(p, base);
-                    if (r) {
-                        const m = fs.statSync(r).mtimeMs;
-                        if (!best || m > best.m) best = { p: r, m };
-                    }
-                } else if (e.name === base) {
-                    const m = fs.statSync(p).mtimeMs;
-                    if (!best || m > best.m) best = { p, m };
+    /**
+     * Case-insensitive, rename-tolerant lookup of `base` directly inside each of
+     * `dirs` (non-recursive). slskd may write a different case than the remote
+     * name, and its "exists: rename" appends " (1)" etc.
+     */
+    private findInDirs(dirs: string[], base: string): string | null {
+        const lc = base.toLowerCase();
+        const dot = lc.lastIndexOf(".");
+        const ext = dot >= 0 ? lc.slice(dot) : "";
+        const stem = dot >= 0 ? lc.slice(0, dot) : lc;
+        for (const dir of dirs) {
+            let entries: fs.Dirent[];
+            try {
+                entries = fs.readdirSync(dir, { withFileTypes: true });
+            } catch {
+                continue;
+            }
+            // Exact (case-insensitive) match first.
+            for (const e of entries) {
+                if (e.isFile() && e.name.toLowerCase() === lc) {
+                    return path.join(dir, e.name);
                 }
             }
+            // Rename-tolerant: "<stem> (1).<ext>".
+            for (const e of entries) {
+                const n = e.name.toLowerCase();
+                if (e.isFile() && n.startsWith(stem) && n.endsWith(ext)) {
+                    return path.join(dir, e.name);
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Bounded recursive (case-insensitive) search for `base` under `dir`,
+     * skipping the given directory names (e.g. the Playlists library tree, where
+     * already-moved files live). Returns the newest match.
+     */
+    private findFileRecursive(
+        dir: string,
+        base: string,
+        skip: Set<string>,
+        depth = 0
+    ): string | null {
+        const lc = base.toLowerCase();
+        let best: { p: string; m: number } | null = null;
+        if (depth > 4) return null;
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
         } catch {
-            // dir missing / unreadable
+            return null;
+        }
+        for (const e of entries) {
+            const p = path.join(dir, e.name);
+            if (e.isDirectory()) {
+                if (skip.has(e.name)) continue;
+                const r = this.findFileRecursive(p, base, skip, depth + 1);
+                if (r) {
+                    try {
+                        const m = fs.statSync(r).mtimeMs;
+                        if (!best || m > best.m) best = { p: r, m };
+                    } catch {
+                        /* ignore */
+                    }
+                }
+            } else if (e.name.toLowerCase() === lc) {
+                try {
+                    const m = fs.statSync(p).mtimeMs;
+                    if (!best || m > best.m) best = { p, m };
+                } catch {
+                    /* ignore */
+                }
+            }
         }
         return best?.p ?? null;
     }
 
-    /**
-     * Locate a completed slskd download on disk and move it to destPath. slskd
-     * writes to `${downloadBase}/${SLSKD_INCOMING}/<basename>`; fall back to a
-     * recursive search by basename if the layout differs.
-     */
-    private async locateAndMove(
-        remoteFilename: string,
-        downloadBase: string,
-        destPath: string
-    ): Promise<boolean> {
-        const base = path.basename(remoteFilename.replace(/\\/g, "/"));
-        const incoming = path.join(downloadBase, SLSKD_INCOMING);
-        const primary = path.join(incoming, base);
-        let src: string | null = fs.existsSync(primary) ? primary : null;
-        if (!src) src = this.findFileByBasename(incoming, base);
-        if (!src) src = this.findFileByBasename(downloadBase, base);
-        if (!src) return false;
+    private moveTo(src: string, destPath: string): boolean {
         try {
             fs.mkdirSync(path.dirname(destPath), { recursive: true });
             try {
@@ -646,6 +721,39 @@ class SoulseekService {
             );
             return false;
         }
+    }
+
+    /**
+     * Locate a completed slskd download on disk and move it to destPath. Handles
+     * both layouts: the fixed `${downloadBase}/${SLSKD_INCOMING}/` (when we've
+     * pushed that config) and slskd's default `${SOURCE_DIRECTORY}` template
+     * (`${downloadBase}/<remote parent folder>/`). Retries briefly because slskd
+     * finalizes (incomplete→complete) a moment after "Completed, Succeeded".
+     */
+    private async locateAndMove(
+        remoteFilename: string,
+        downloadBase: string,
+        destPath: string
+    ): Promise<boolean> {
+        const norm = remoteFilename.replace(/\\/g, "/");
+        const base = path.basename(norm);
+        const sourceDir = path.basename(path.dirname(norm)); // slskd ${SOURCE_DIRECTORY}
+        const fastDirs = [
+            path.join(downloadBase, SLSKD_INCOMING),
+            sourceDir ? path.join(downloadBase, sourceDir) : downloadBase,
+            downloadBase,
+        ];
+        // Skip the destination library tree so we never re-match an already-moved
+        // file from a previous track.
+        const skip = new Set<string>(["Playlists"]);
+        for (let attempt = 0; attempt < 5; attempt++) {
+            const hit =
+                this.findInDirs(fastDirs, base) ||
+                this.findFileRecursive(downloadBase, base, skip);
+            if (hit) return this.moveTo(hit, destPath);
+            await new Promise((r) => setTimeout(r, 600));
+        }
+        return false;
     }
 
     /**
