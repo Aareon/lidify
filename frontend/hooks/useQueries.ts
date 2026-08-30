@@ -565,6 +565,17 @@ export function usePlaylistQuery(id: string | undefined) {
         },
         enabled: !!id,
         staleTime: 1 * 60 * 1000, // 1 minute
+        // Auto-refresh while tracks are still downloading. Retried tracks can
+        // finish at any time (a Soulseek peer may stall then a later attempt
+        // succeeds), so a fixed post-retry timer misses the real completion and
+        // the row stays "pending"/YT until a manual refresh. Poll only while
+        // pendingCount > 0; stop (return false) once everything has landed.
+        refetchInterval: (query) => {
+            const data = query.state.data as
+                | { pendingCount?: number }
+                | undefined;
+            return data && (data.pendingCount ?? 0) > 0 ? 8000 : false;
+        },
     });
 }
 
