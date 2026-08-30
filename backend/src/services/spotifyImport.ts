@@ -13,6 +13,7 @@ import { prisma } from "../utils/db";
 import { redisClient } from "../utils/redis";
 import { normalizeArtistName } from "../utils/artistNormalization";
 import { youtubeMusicService } from "./youtube-music";
+import { queueAlbumUpgrade } from "./albumUpgrade";
 import { rewriteAudioTags } from "../utils/audioTags";
 import PQueue from "p-queue";
 import path from "path";
@@ -339,10 +340,11 @@ class SpotifyImportService {
         track: { artist: string; title: string; album: string; durationMs: number },
         settings: any,
         options: {
+            userId: string;
             soulseekUsable: boolean;
             youtubeUsable: boolean;
         }
-    ): Promise<{ success: boolean; source: "soulseek" | "youtube" | "none"; filePath?: string; error?: string }> {
+    ): Promise<{ success: boolean; source: "soulseek" | "youtube" | "lidarr" | "none"; filePath?: string; error?: string }> {
         const albumFolder =
             track.album && track.album !== "Unknown Album" ? track.album : track.artist;
 
@@ -377,9 +379,21 @@ class SpotifyImportService {
                     }
                 }
             } catch (err: any) {
-                // Fall through to YouTube
+                // Fall through to the smart upgrade / YouTube
                 void err;
             }
+        }
+
+        // Smart upgrade: Soulseek missed → queue a background Lidarr grab of the
+        // whole album (deduped per album). Leave the track pending so it streams
+        // via YouTube now and upgrades to the proper file when Lidarr imports.
+        const upgrade = await queueAlbumUpgrade(
+            options.userId,
+            track.artist,
+            albumFolder
+        );
+        if (upgrade.handled) {
+            return { success: true, source: "lidarr" };
         }
 
         // YouTube fallback (if enabled)
@@ -1251,6 +1265,7 @@ class SpotifyImportService {
                     tracksToDownload.map((t) =>
                         queue.add(async () => {
                             const result = await this.acquirePlaylistTrack(t, settings, {
+                                userId: job.userId,
                                 soulseekUsable,
                                 youtubeUsable,
                             });

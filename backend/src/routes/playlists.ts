@@ -6,6 +6,7 @@ import { prisma } from "../utils/db";
 import { z } from "zod";
 import { sessionLog } from "../utils/playlistLogger";
 import { youtubeMusicService } from "../services/youtube-music";
+import { queueAlbumUpgrade } from "../services/albumUpgrade";
 import { rewriteAudioTags } from "../utils/audioTags";
 
 const router = Router();
@@ -856,6 +857,39 @@ router.post("/:id/pending/:trackId/retry", async (req, res) => {
                 };
             }
 
+            // 1.5) Smart upgrade: Soulseek missed → queue a background Lidarr grab
+            // of the whole album (deduped per album) and leave the track streaming
+            // via YouTube (it stays pending). The proper file replaces it when
+            // Lidarr imports (scan → reconcilePendingTracks). Only fall through to
+            // a YouTube download if Lidarr can't get it.
+            if (!final.success) {
+                const upgrade = await queueAlbumUpgrade(
+                    userId,
+                    pendingTrack.spotifyArtist,
+                    albumName
+                );
+                if (upgrade.handled) {
+                    sessionLog(
+                        "PENDING-RETRY",
+                        `Soulseek missed — ${upgrade.queued ? "queued" : "reusing"} Lidarr album grab (${upgrade.album || albumName}); track streams via YouTube until it imports`
+                    );
+                    await prisma.downloadJob.update({
+                        where: { id: downloadJob.id },
+                        data: {
+                            status: "completed",
+                            completedAt: new Date(),
+                            metadata: {
+                                ...(downloadJob.metadata as any),
+                                source: "lidarr-album-upgrade",
+                                note: "Fetching the full album via Lidarr; the track upgrades to a proper file when it imports.",
+                                albumUpgradeJobId: upgrade.jobId,
+                            },
+                        },
+                    });
+                    return;
+                }
+            }
+
             // 2) YouTube fallback
             if (!final.success) {
                 const match = youtubeMatch
@@ -1161,6 +1195,22 @@ router.post("/:id/pending/retry-all", async (req, res) => {
                                     }
                                 } catch {
                                     ok = false;
+                                }
+                            }
+
+                            // Smart upgrade: Soulseek missed → queue a background
+                            // Lidarr album grab (deduped per album) and leave the
+                            // track streaming via YouTube. Same-album tracks all
+                            // reuse the one grab and skip the YouTube download, so
+                            // the proper files replace them when Lidarr imports.
+                            if (!ok) {
+                                const upgrade = await queueAlbumUpgrade(
+                                    userId,
+                                    t.artist,
+                                    t.album
+                                );
+                                if (upgrade.handled) {
+                                    ok = true; // delegated to Lidarr; streams meanwhile
                                 }
                             }
 
