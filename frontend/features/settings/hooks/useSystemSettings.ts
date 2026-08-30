@@ -17,6 +17,10 @@ const defaultSystemSettings: SystemSettings = {
     soulseekEnabled: true,
     soulseekUsername: "",
     soulseekPassword: "",
+    soulseekSharingEnabled: false,
+    soulseekSharePath: "/music",
+    soulseekUploadSlots: 2,
+    soulseekUploadSpeedLimitKbps: 0,
     youtubeEnabled: true,
     spotifyClientId: "",
     spotifyClientSecret: "",
@@ -110,7 +114,11 @@ export function useSystemSettings() {
             }
             if (
                 originalSettings.soulseekUsername !== settingsToSave.soulseekUsername ||
-                originalSettings.soulseekPassword !== settingsToSave.soulseekPassword
+                originalSettings.soulseekPassword !== settingsToSave.soulseekPassword ||
+                originalSettings.soulseekSharingEnabled !== settingsToSave.soulseekSharingEnabled ||
+                originalSettings.soulseekSharePath !== settingsToSave.soulseekSharePath ||
+                originalSettings.soulseekUploadSlots !== settingsToSave.soulseekUploadSlots ||
+                originalSettings.soulseekUploadSpeedLimitKbps !== settingsToSave.soulseekUploadSpeedLimitKbps
             ) {
                 changed.push("Soulseek");
             }

@@ -120,6 +120,12 @@ const systemSettingsSchema = z.object({
     soulseekUsername: z.string().nullable().optional(),
     soulseekPassword: z.string().nullable().optional(),
 
+    // Soulseek Sharing (scaffolding; serving not yet implemented)
+    soulseekSharingEnabled: z.boolean().optional(),
+    soulseekSharePath: z.string().nullable().optional(),
+    soulseekUploadSlots: z.number().int().min(1).max(20).optional(),
+    soulseekUploadSpeedLimitKbps: z.number().int().min(0).optional(),
+
     // YouTube Music (yt-dlp fallback)
     youtubeEnabled: z.boolean().optional(),
 
@@ -162,6 +168,10 @@ router.get("/", async (req, res) => {
                     audiobookshelfUrl: "http://localhost:13378",
                     musicPath: "/music",
                     downloadPath: "/soulseek-downloads",
+                    soulseekSharingEnabled: false,
+                    soulseekSharePath: "/music",
+                    soulseekUploadSlots: 2,
+                    soulseekUploadSpeedLimitKbps: 0,
                     autoSync: true,
                     autoEnrichMetadata: true,
                     maxConcurrentDownloads: 3,

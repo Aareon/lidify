@@ -103,6 +103,14 @@ model SystemSettings {
   soulseekUsername String? // Soulseek network username
   soulseekPassword String? // Soulseek network password - Encrypted
 
+  // Soulseek Sharing (upload/serve files back to the network).
+  // Scaffolding for a future feature: soulseek-ts (the current client) cannot
+  // serve files yet, so these are config-only until the serving layer lands.
+  soulseekSharingEnabled       Boolean @default(false) // Master toggle for sharing
+  soulseekSharePath            String? @default("/music") // Directory served to peers
+  soulseekUploadSlots          Int     @default(2) // Max concurrent uploads
+  soulseekUploadSpeedLimitKbps Int     @default(0) // Upload throttle; 0 = unlimited
+
   // YouTube Music (yt-dlp fallback for streaming/downloads)
   youtubeEnabled Boolean @default(true) // Enable/disable YouTube Music fallback
 

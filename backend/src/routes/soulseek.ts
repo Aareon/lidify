@@ -5,10 +5,15 @@
 
 import { Router } from "express";
 import path from "path";
-import { requireAuth } from "../middleware/auth";
+import { requireAuth, requireAdmin } from "../middleware/auth";
 import { soulseekService } from "../services/soulseek";
 import { getSystemSettings } from "../utils/systemSettings";
 import { scanQueue } from "../workers/queues";
+import {
+    getSharingStatus,
+    rescanShare,
+    SharingNotImplementedError,
+} from "../services/soulseekSharing";
 
 const router = Router();
 
@@ -344,6 +349,50 @@ router.post(
         }
     }
 );
+
+// ── Soulseek Sharing (admin) ─────────────────────────────────────────────────
+// Scaffolding for serving files back to the network. Config lives on
+// SystemSettings (saved via /system-settings); these endpoints expose status and
+// the future "rescan" action. Serving is not implemented yet — see
+// services/soulseekSharing.ts.
+
+/**
+ * GET /soulseek/sharing
+ * Current sharing config + runtime status (admin only).
+ */
+router.get("/sharing", requireAuth, requireAdmin, async (req, res) => {
+    try {
+        const status = await getSharingStatus();
+        res.json(status);
+    } catch (error: any) {
+        console.error("Soulseek sharing status error:", error.message);
+        res.status(500).json({
+            error: "Failed to get sharing status",
+            details: error.message,
+        });
+    }
+});
+
+/**
+ * POST /soulseek/sharing/rescan
+ * Rebuild the shared file index (admin only). Not implemented yet — returns 501
+ * so the UI can wire the control honestly.
+ */
+router.post("/sharing/rescan", requireAuth, requireAdmin, async (req, res) => {
+    try {
+        await rescanShare();
+        res.json({ success: true });
+    } catch (error: any) {
+        if (error instanceof SharingNotImplementedError) {
+            return res.status(501).json({ error: error.message });
+        }
+        console.error("Soulseek sharing rescan error:", error.message);
+        res.status(500).json({
+            error: "Failed to rescan share",
+            details: error.message,
+        });
+    }
+});
 
 /**
  * POST /soulseek/disconnect

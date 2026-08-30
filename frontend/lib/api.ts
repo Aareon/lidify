@@ -1750,6 +1750,26 @@ class ApiClient {
         );
     }
 
+    // Soulseek Sharing (admin) — config-only scaffolding until serving lands
+    async getSoulseekSharing() {
+        return this.request<{
+            supported: boolean;
+            enabled: boolean;
+            sharePath: string | null;
+            uploadSlots: number;
+            uploadSpeedLimitKbps: number;
+            pathExists: boolean;
+            sharedFileCount: number | null;
+            activeUploads: number | null;
+        }>("/soulseek/sharing");
+    }
+
+    async rescanSoulseekShare() {
+        return this.request<{ success: boolean }>("/soulseek/sharing/rescan", {
+            method: "POST",
+        });
+    }
+
     async downloadFromSoulseek(
         username: string,
         filepath: string,

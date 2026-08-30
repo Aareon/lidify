@@ -19,6 +19,7 @@ import { PlaybackSection } from "@/features/settings/components/sections/Playbac
 import { SubsonicSection } from "@/features/settings/components/sections/SubsonicSection";
 import { LidarrSection } from "@/features/settings/components/sections/LidarrSection";
 import { SoulseekSection } from "@/features/settings/components/sections/SoulseekSection";
+import { SoulseekSharingSection } from "@/features/settings/components/sections/SoulseekSharingSection";
 import { AIServicesSection } from "@/features/settings/components/sections/AIServicesSection";
 import { LibraryHealthSection } from "@/features/settings/components/sections/LibraryHealthSection";
 import { ArtworkSection } from "@/features/settings/components/sections/ArtworkSection";
@@ -36,6 +37,7 @@ const sidebarItems: SidebarItem[] = [
     // Download Sources (admin)
     { id: "lidarr", label: "Album Downloads", adminOnly: true },
     { id: "soulseek", label: "Track Downloads", adminOnly: true },
+    { id: "soulseek-sharing", label: "Soulseek Sharing", adminOnly: true },
     // AI & Enrichment (admin)
     { id: "ai-services", label: "AI Services", adminOnly: true },
     { id: "artwork", label: "Artwork Sources", adminOnly: true },
@@ -187,6 +189,12 @@ export default function SettingsPage() {
                             onUpdate={updateSystemSettings}
                             onTest={handleTestService}
                             isTesting={testingServices.soulseek || false}
+                        />
+
+                        {/* Soulseek Sharing - scaffolding for uploads/serving */}
+                        <SoulseekSharingSection
+                            settings={systemSettings}
+                            onUpdate={updateSystemSettings}
                         />
 
                         {/* ─────────────────────────────────────────────────────

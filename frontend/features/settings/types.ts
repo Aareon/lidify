@@ -31,6 +31,11 @@ export interface SystemSettings {
     soulseekEnabled: boolean;
     soulseekUsername: string;
     soulseekPassword: string;
+    // Soulseek Sharing (scaffolding; serving not yet implemented)
+    soulseekSharingEnabled: boolean;
+    soulseekSharePath: string;
+    soulseekUploadSlots: number;
+    soulseekUploadSpeedLimitKbps: number;
     // YouTube Music (yt-dlp fallback)
     youtubeEnabled: boolean;
     // Spotify (for playlist import)
