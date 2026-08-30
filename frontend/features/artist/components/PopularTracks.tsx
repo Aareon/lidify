@@ -1,5 +1,5 @@
 import React from "react";
-import { Play, Pause, Music } from "lucide-react";
+import { Play, Pause, Music, Download, Check } from "lucide-react";
 import { cn } from "@/utils/cn";
 import Image from "next/image";
 import { api } from "@/lib/api";
@@ -22,6 +22,10 @@ interface PopularTracksProps {
     previewAlbumInfo?: Record<string, PreviewAlbumInfo>;
     noPreviewTracks?: Set<string>;
     onPreview: (track: Track, e: React.MouseEvent) => void;
+    /** Download a preview (not-in-library) track via the smart pipeline. */
+    onDownload?: (track: Track, e: React.MouseEvent) => void;
+    /** Track IDs whose download has been requested (shows a check). */
+    downloadRequested?: Set<string>;
 }
 
 export const PopularTracks: React.FC<PopularTracksProps> = ({
@@ -33,6 +37,8 @@ export const PopularTracks: React.FC<PopularTracksProps> = ({
     previewAlbumInfo,
     noPreviewTracks,
     onPreview,
+    onDownload,
+    downloadRequested,
 }) => {
     const formatDuration = (seconds: number) => {
         const mins = Math.floor(seconds / 60);
@@ -188,8 +194,30 @@ export const PopularTracks: React.FC<PopularTracksProps> = ({
                                     )}
                             </div>
 
-                            {/* Duration - only show if > 0 */}
-                            <div className="flex items-center justify-end">
+                            {/* Download (preview tracks) + Duration */}
+                            <div className="flex items-center justify-end gap-1.5">
+                                {isUnowned &&
+                                    onDownload &&
+                                    (downloadRequested?.has(track.id) ? (
+                                        <span
+                                            className="p-1.5 text-brand"
+                                            title="Download started — it'll appear in your library soon"
+                                        >
+                                            <Check className="w-4 h-4" />
+                                        </span>
+                                    ) : (
+                                        <button
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                onDownload(track, e);
+                                            }}
+                                            className="opacity-0 group-hover:opacity-100 focus:opacity-100 p-1.5 rounded-full text-gray-400 hover:text-white hover:bg-white/10 transition-all"
+                                            title="Download to your library"
+                                            aria-label={`Download ${track.title}`}
+                                        >
+                                            <Download className="w-4 h-4" />
+                                        </button>
+                                    ))}
                                 {track.duration > 0 && (
                                     <span className="text-sm text-gray-400 w-10 text-right">
                                         {formatDuration(track.duration)}

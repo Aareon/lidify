@@ -835,4 +835,89 @@ router.post("/keep-track", async (req, res) => {
     }
 });
 
+/**
+ * POST /downloads/track
+ * Smart per-track download (Soulseek → background Lidarr album grab → YouTube).
+ * Used by the artist page's "download preview track" button. Returns immediately;
+ * the acquisition runs in the background and a scan surfaces the file when done.
+ */
+router.post("/track", async (req, res) => {
+    const userId = req.user!.id;
+    const { artist, title, album, durationMs } = req.body || {};
+    if (!artist || !title) {
+        return res
+            .status(400)
+            .json({ error: "artist and title are required" });
+    }
+
+    // Respond right away — the download happens in the background.
+    res.json({ success: true, message: "Download started" });
+
+    (async () => {
+        const { notificationService } = await import(
+            "../services/notificationService"
+        );
+        try {
+            const { acquireTrackSmart } = await import(
+                "../services/trackAcquisition"
+            );
+            const result = await acquireTrackSmart(
+                userId,
+                { artist, title, album, durationMs },
+                { downloadSubdir: "Singles" }
+            );
+
+            if (
+                result.success &&
+                (result.source === "soulseek" || result.source === "youtube")
+            ) {
+                // Scan the Singles folder so the new file enters the library.
+                const { getSystemSettings } = await import(
+                    "../utils/systemSettings"
+                );
+                const settings = await getSystemSettings();
+                const downloadBase = settings?.downloadPath || "/downloads";
+                const path = await import("path");
+                const { scanQueue } = await import("../workers/queues");
+                await scanQueue.add("scan", {
+                    userId,
+                    musicPath: path.join(downloadBase, "Singles"),
+                    basePath: downloadBase,
+                    source: "single-track-download",
+                });
+                await notificationService.notifySystem(
+                    userId,
+                    "Track Downloaded",
+                    `"${title}" by ${artist} downloaded (${result.source}).`
+                );
+            } else if (result.success && result.source === "lidarr") {
+                await notificationService.notifySystem(
+                    userId,
+                    "Fetching Album",
+                    `Getting "${title}" by ${artist} via Lidarr — it'll appear once the album imports.`
+                );
+            } else {
+                await notificationService.notifySystem(
+                    userId,
+                    "Download Failed",
+                    `Couldn't get "${title}" by ${artist}: ${
+                        result.error || "no source found"
+                    }`
+                );
+            }
+        } catch (error: any) {
+            console.error("[Track Download] error:", error?.message || error);
+            try {
+                await notificationService.notifySystem(
+                    userId,
+                    "Download Failed",
+                    `Error downloading "${title}" by ${artist}.`
+                );
+            } catch {
+                /* ignore */
+            }
+        }
+    })();
+});
+
 export default router;

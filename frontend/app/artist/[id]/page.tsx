@@ -98,6 +98,40 @@ export default function ArtistPage() {
     playTracks(formattedTracks, Math.max(0, startIndex));
   }
 
+  // Download a preview (not-in-library) track via the smart pipeline
+  // (Soulseek → background Lidarr album grab → YouTube). Fire-and-forget; a
+  // notification + a library scan surface the track when it lands.
+  const [downloadRequested, setDownloadRequested] = useState<Set<string>>(
+    new Set()
+  );
+  async function handleDownloadPreview(track: Track) {
+    if (!artist || downloadRequested.has(track.id)) return;
+    setDownloadRequested((prev) => new Set(prev).add(track.id));
+    try {
+      const albumTitle =
+        previewAlbumInfo?.[track.id]?.title ||
+        (track.album?.title && track.album.title !== "Unknown Album"
+          ? track.album.title
+          : undefined);
+      await api.downloadTrack(
+        artist.name,
+        track.title,
+        albumTitle,
+        track.duration ? track.duration * 1000 : undefined
+      );
+      toast.success(
+        `Downloading "${track.title}" — it'll appear in your library soon`
+      );
+    } catch {
+      toast.error("Failed to start download");
+      setDownloadRequested((prev) => {
+        const n = new Set(prev);
+        n.delete(track.id);
+        return n;
+      });
+    }
+  }
+
   // Download album handler
   function handleDownloadAlbum(album: Album, e: MouseEvent<HTMLButtonElement>) {
     downloadAlbum(album, artist?.name || "", e);
@@ -217,6 +251,8 @@ export default function ArtistPage() {
               onPreview={(track: Track, e: MouseEvent<HTMLButtonElement>) =>
                 handlePreview(track, artist.name, e)
               }
+              onDownload={(track: Track) => handleDownloadPreview(track)}
+              downloadRequested={downloadRequested}
             />
           )}
 

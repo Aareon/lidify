@@ -1216,6 +1216,22 @@ class ApiClient {
         });
     }
 
+    // Smart per-track download (Soulseek → Lidarr album grab → YouTube).
+    async downloadTrack(
+        artist: string,
+        title: string,
+        album?: string | null,
+        durationMs?: number
+    ) {
+        return this.request<{ success: boolean; message: string }>(
+            "/downloads/track",
+            {
+                method: "POST",
+                body: JSON.stringify({ artist, title, album, durationMs }),
+            }
+        );
+    }
+
     async getDownloadStatus(id: string) {
         return this.request<any>(`/downloads/${id}`);
     }

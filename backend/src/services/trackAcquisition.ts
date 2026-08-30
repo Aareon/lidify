@@ -1,0 +1,161 @@
+/**
+ * Smart per-track acquisition — the single source of truth for the download
+ * pipeline shared by playlist imports and the artist page's "download preview
+ * track" button.
+ *
+ * Pipeline (per track):
+ *   1. Soulseek — download the single file. Success → done.
+ *   2. Miss → queue a background Lidarr grab of the whole album (deduped per
+ *      album). If Lidarr can get it, we're "handled" — the proper file lands
+ *      when Lidarr imports (scan → reconcile). See services/albumUpgrade.ts.
+ *   3. Lidarr disabled / album not found → YouTube download (yt-dlp).
+ *
+ * `downloadSubdir` namespaces where files land under the download path
+ * (e.g. "Playlists" for imports, "Singles" for standalone track downloads).
+ */
+
+import path from "path";
+import { soulseekService } from "./soulseek";
+import { youtubeMusicService } from "./youtube-music";
+import { queueAlbumUpgrade } from "./albumUpgrade";
+import { rewriteAudioTags } from "../utils/audioTags";
+import { getSystemSettings } from "../utils/systemSettings";
+
+export interface AcquireTrackInput {
+    artist: string;
+    title: string;
+    album?: string | null;
+    durationMs?: number;
+}
+
+export interface AcquireTrackResult {
+    success: boolean;
+    source: "soulseek" | "lidarr" | "youtube" | "none";
+    filePath?: string;
+    error?: string;
+}
+
+function sanitizePathPart(name: string): string {
+    return name.replace(/[<>:"/\\|?*]/g, "_").trim();
+}
+
+export async function acquireTrackSmart(
+    userId: string,
+    track: AcquireTrackInput,
+    opts: {
+        downloadSubdir: string;
+        /** Pre-computed usability (batch imports compute once); else derived from settings. */
+        soulseekUsable?: boolean;
+        youtubeUsable?: boolean;
+    }
+): Promise<AcquireTrackResult> {
+    const settings = await getSystemSettings();
+    const musicPath = settings?.musicPath || "/music";
+    const downloadBase = settings?.downloadPath || "/soulseek-downloads";
+    // Fall back to the artist name as the folder when the album is unknown.
+    const albumFolder =
+        track.album && track.album !== "Unknown Album"
+            ? track.album
+            : track.artist;
+
+    const soulseekUsable =
+        opts.soulseekUsable ??
+        Boolean(
+            settings?.soulseekEnabled !== false &&
+                settings?.soulseekUsername &&
+                settings?.soulseekPassword &&
+                (await soulseekService.isAvailable())
+        );
+    const youtubeUsable = opts.youtubeUsable ?? settings?.youtubeEnabled !== false;
+
+    // 1) Soulseek — proper single file.
+    if (soulseekUsable) {
+        try {
+            const searchResult = await soulseekService.searchTrack(
+                track.artist,
+                track.title,
+                false,
+                {
+                    preferFlac: true,
+                    allowMp3320Fallback: true,
+                    allowMp3256Fallback: true,
+                    timeoutMs: 3500,
+                }
+            );
+            if (searchResult.found && searchResult.allMatches.length > 0) {
+                const dl = await soulseekService.downloadBestMatch(
+                    track.artist,
+                    track.title,
+                    albumFolder,
+                    searchResult.allMatches,
+                    musicPath,
+                    { downloadSubdir: opts.downloadSubdir }
+                );
+                if (dl.success) {
+                    return { success: true, source: "soulseek", filePath: dl.filePath };
+                }
+            }
+        } catch {
+            // fall through to the smart upgrade / YouTube
+        }
+    }
+
+    // 2) Smart upgrade: queue a background Lidarr album grab (deduped per album).
+    const upgrade = await queueAlbumUpgrade(userId, track.artist, albumFolder);
+    if (upgrade.handled) {
+        return { success: true, source: "lidarr" };
+    }
+
+    // 3) YouTube fallback.
+    if (!youtubeUsable) {
+        return {
+            success: false,
+            source: "none",
+            error: "Soulseek failed and YouTube is disabled",
+        };
+    }
+    const durationSeconds = track.durationMs
+        ? Math.round(track.durationMs / 1000)
+        : undefined;
+    const match = await youtubeMusicService.findTrack(
+        track.artist,
+        track.title,
+        durationSeconds,
+        albumFolder
+    );
+    if (!match?.videoId) {
+        return { success: false, source: "youtube", error: "No YouTube match found" };
+    }
+    const outputDir = path.join(
+        downloadBase,
+        opts.downloadSubdir,
+        sanitizePathPart(track.artist),
+        sanitizePathPart(albumFolder)
+    );
+    const filename = `${sanitizePathPart(track.artist)} - ${sanitizePathPart(
+        track.title
+    )} - ${match.videoId}`;
+    try {
+        const dl = await youtubeMusicService.downloadTrack(
+            match.videoId,
+            outputDir,
+            filename
+        );
+        try {
+            await rewriteAudioTags(dl.filePath, {
+                title: track.title,
+                artist: track.artist,
+                album: albumFolder,
+            });
+        } catch {
+            // Tagging improves reconcile reliability but isn't required for scan.
+        }
+        return { success: true, source: "youtube", filePath: dl.filePath };
+    } catch (err: any) {
+        return {
+            success: false,
+            source: "youtube",
+            error: err?.message || "YouTube download failed",
+        };
+    }
+}
