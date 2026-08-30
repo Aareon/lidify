@@ -86,6 +86,41 @@ interface ImportJob {
     error: string | null;
 }
 
+// A row in the "Your imports" list (GET /api/spotify/imports). Mirrors the
+// backend ImportJob plus playlistName/createdAt that the list endpoint returns.
+interface ImportListItem {
+    id: string;
+    playlistName: string;
+    status: ImportJob["status"];
+    progress: number;
+    albumsTotal: number;
+    albumsCompleted: number;
+    tracksMatched: number;
+    tracksTotal: number;
+    tracksDownloadable: number;
+    createdPlaylistId: string | null;
+    error: string | null;
+    createdAt: string;
+}
+
+const ACTIVE_IMPORT_STATUSES: ReadonlySet<ImportJob["status"]> = new Set<
+    ImportJob["status"]
+>(["pending", "downloading", "scanning", "creating_playlist", "matching_tracks"]);
+
+const IMPORT_STATUS_META: Record<
+    ImportJob["status"],
+    { label: string; color: string }
+> = {
+    pending: { label: "Waiting for downloads", color: "text-amber-400" },
+    downloading: { label: "Downloading", color: "text-spotify" },
+    scanning: { label: "Scanning library", color: "text-spotify" },
+    creating_playlist: { label: "Creating playlist", color: "text-spotify" },
+    matching_tracks: { label: "Matching tracks", color: "text-spotify" },
+    completed: { label: "Complete", color: "text-green-400" },
+    failed: { label: "Failed", color: "text-red-400" },
+    cancelled: { label: "Cancelled", color: "text-gray-400" },
+};
+
 type Step = "input" | "preview" | "importing" | "complete";
 
 function SpotifyImportPageContent() {
@@ -108,6 +143,44 @@ function SpotifyImportPageContent() {
     const [expandedSection, setExpandedSection] = useState<
         "matched" | "download" | null
     >("matched");
+
+    // "Your imports" list — all of this user's import jobs (URL + offline bulk).
+    // null = not loaded yet. Offline imports redirect here to watch progress, so
+    // this list is how those background jobs surface. Polls while any is active.
+    const [imports, setImports] = useState<ImportListItem[] | null>(null);
+
+    useEffect(() => {
+        let mounted = true;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+
+        const tick = async () => {
+            try {
+                const jobs = await api.get<ImportListItem[]>(
+                    "/spotify/imports"
+                );
+                if (!mounted) return;
+                setImports(jobs);
+                const anyActive = jobs.some((j) =>
+                    ACTIVE_IMPORT_STATUSES.has(j.status)
+                );
+                // Poll fast while downloads are in flight; idle otherwise.
+                timer = setTimeout(tick, anyActive ? 4000 : 30000);
+            } catch (err) {
+                console.error("Failed to fetch imports:", err);
+                if (mounted) timer = setTimeout(tick, 30000);
+            }
+        };
+
+        tick();
+        const onChanged = () => tick();
+        window.addEventListener("spotify-imports-changed", onChanged);
+
+        return () => {
+            mounted = false;
+            if (timer) clearTimeout(timer);
+            window.removeEventListener("spotify-imports-changed", onChanged);
+        };
+    }, []);
 
     // Auto-fetch preview if URL is provided in query params
     useEffect(() => {
@@ -166,6 +239,9 @@ function SpotifyImportPageContent() {
                         new CustomEvent("notifications-changed")
                     );
                     window.dispatchEvent(new CustomEvent("playlist-created"));
+                    window.dispatchEvent(
+                        new CustomEvent("spotify-imports-changed")
+                    );
                 } else if (job.status === "cancelled") {
                     setStep("complete");
                     refreshLibraryCaches(queryClient);
@@ -361,6 +437,91 @@ function SpotifyImportPageContent() {
                         </Link>
                     </p>
                 </div>
+
+                {/* Your imports — background job progress (URL + offline bulk) */}
+                {step === "input" && imports && imports.length > 0 && (
+                    <div className="mb-6">
+                        <h2 className="text-sm font-semibold text-gray-300 mb-3">
+                            Your imports
+                        </h2>
+                        <div className="space-y-2">
+                            {imports.slice(0, 15).map((job) => {
+                                const meta = IMPORT_STATUS_META[job.status];
+                                const isActive = ACTIVE_IMPORT_STATUSES.has(
+                                    job.status
+                                );
+                                return (
+                                    <div
+                                        key={job.id}
+                                        className="p-3 rounded-lg bg-white/5 border border-white/10"
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <div className="flex-1 min-w-0">
+                                                <div className="text-sm text-white truncate">
+                                                    {job.playlistName}
+                                                </div>
+                                                <div
+                                                    className={`text-xs ${meta.color} flex items-center flex-wrap gap-x-1.5 gap-y-0.5 mt-0.5`}
+                                                >
+                                                    {isActive && (
+                                                        <Loader2 className="w-3 h-3 animate-spin" />
+                                                    )}
+                                                    <span>{meta.label}</span>
+                                                    <span className="text-gray-600">
+                                                        ·
+                                                    </span>
+                                                    <span className="text-gray-500">
+                                                        {job.tracksMatched}/
+                                                        {job.tracksTotal} songs
+                                                    </span>
+                                                    {job.tracksDownloadable >
+                                                        0 &&
+                                                        job.status !==
+                                                            "completed" && (
+                                                            <>
+                                                                <span className="text-gray-600">
+                                                                    ·
+                                                                </span>
+                                                                <span className="text-gray-500">
+                                                                    {
+                                                                        job.tracksDownloadable
+                                                                    }{" "}
+                                                                    downloading
+                                                                </span>
+                                                            </>
+                                                        )}
+                                                </div>
+                                                {job.error && (
+                                                    <div className="text-xs text-red-400 mt-1 truncate">
+                                                        {job.error}
+                                                    </div>
+                                                )}
+                                            </div>
+                                            {job.createdPlaylistId && (
+                                                <Link
+                                                    href={`/playlist/${job.createdPlaylistId}`}
+                                                    className="shrink-0 px-3 py-1.5 rounded-full text-xs font-medium bg-white/10 text-white hover:bg-white/20 transition-colors"
+                                                >
+                                                    View
+                                                </Link>
+                                            )}
+                                        </div>
+                                        {isActive && (
+                                            <div className="mt-2 w-full bg-white/10 rounded-full h-1">
+                                                <div
+                                                    className="bg-spotify h-1 rounded-full transition-all duration-500"
+                                                    style={{
+                                                        width: `${job.progress}%`,
+                                                    }}
+                                                />
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
 
                 {/* Step: Input */}
                 {step === "input" && (
