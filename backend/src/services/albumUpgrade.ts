@@ -53,20 +53,28 @@ function pickBestAlbum(
     if (!Array.isArray(results) || results.length === 0) return null;
     const wantAlbum = norm(albumTitle);
     const wantArtist = norm(artistName);
-    let best: { a: any; score: number } | null = null;
+    let best: { a: any; score: number; titleMatched: boolean } | null = null;
     for (const a of results) {
         const title = norm(a?.title || "");
         const artist = norm(a?.artist?.artistName || a?.artistName || "");
-        if (!a?.foreignAlbumId) continue;
+        if (!a?.foreignAlbumId || !title) continue;
         let score = 0;
-        if (title === wantAlbum) score += 3;
-        else if (title.includes(wantAlbum) || wantAlbum.includes(title)) score += 1;
+        let titleMatched = false;
+        if (title === wantAlbum) {
+            score += 3;
+            titleMatched = true;
+        } else if (title.includes(wantAlbum) || wantAlbum.includes(title)) {
+            score += 1;
+            titleMatched = true;
+        }
         if (artist === wantArtist) score += 2;
         else if (artist.includes(wantArtist) || wantArtist.includes(artist)) score += 1;
-        if (!best || score > best.score) best = { a, score };
+        if (!best || score > best.score) best = { a, score, titleMatched };
     }
-    // Require at least a plausible album-title signal to avoid grabbing the wrong thing.
-    if (best && best.score >= 2) return best.a;
+    // REQUIRE a real album-title match (not artist-only) AND a solid total score.
+    // Artist match alone (score 2) is not enough — that would grab an arbitrary
+    // album by the right artist.
+    if (best && best.titleMatched && best.score >= 3) return best.a;
     return null;
 }
 
@@ -83,6 +91,12 @@ export async function queueAlbumUpgrade(
     try {
         if (!artistName || !albumTitle || albumTitle === "Unknown Album") {
             return { handled: false, queued: false, reason: "insufficient album info" };
+        }
+        // Callers fall back to the ARTIST name as the album folder when the real
+        // album is unknown. We must NOT grab in that case — there's no album to
+        // resolve, and matching on artist alone would pull an arbitrary album.
+        if (norm(albumTitle) === norm(artistName)) {
+            return { handled: false, queued: false, reason: "no real album title (artist name used as album)" };
         }
         if (!(await lidarrService.isEnabled())) {
             return { handled: false, queued: false, reason: "lidarr disabled" };
