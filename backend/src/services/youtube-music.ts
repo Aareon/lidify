@@ -1540,7 +1540,7 @@ class YouTubeMusicService {
         try {
             // Get best audio stream URL
             const { stdout } = await execPromise(
-                `yt-dlp -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" -g --extractor-args "youtube:player_client=android_vr" --no-warnings "${url}"`,
+                `yt-dlp -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" -g --no-warnings "${url}"`,
                 { timeout: 30000 }
             );
 
@@ -1551,7 +1551,7 @@ class YouTubeMusicService {
 
             // Get format info
             const { stdout: formatInfo } = await execPromise(
-                `yt-dlp -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" --print "%(ext)s" --extractor-args "youtube:player_client=android_vr" --no-warnings "${url}"`,
+                `yt-dlp -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" --print "%(ext)s" --no-warnings "${url}"`,
                 { timeout: 10000 }
             ).catch(() => ({ stdout: "webm" }));
 
@@ -1660,7 +1660,9 @@ class YouTubeMusicService {
                 "--audio-quality", "0", // 0 = best available (no upsampling)
                 "--add-metadata",
                 "--no-warnings",
-                "--extractor-args", "youtube:player_client=android_vr", // Use android_vr to bypass SABR/PO token
+                // NOTE: do NOT pin youtube:player_client here. The old android_vr
+                // pin now fails with "Requested format is not available" (YouTube
+                // changed). yt-dlp's default client rotation handles PO tokens/SABR.
                 "--user-agent", `"${DOWNLOAD_USER_AGENT}"`,
                 "--referer", "https://music.youtube.com/",
                 "-o", `"${outputTemplate}"`,
