@@ -61,6 +61,32 @@ export interface OpenRouterModel {
     context_length: number;
 }
 
+// Library Health anomalies (admin remediation). Discriminated by `type` so more
+// anomaly kinds can be added without breaking existing handling.
+export interface DuplicateArtistData {
+    keepId: string;
+    keepName: string;
+    keepMbid: string;
+    keepAlbums: number;
+    keepOwned: number;
+    mergeId: string;
+    mergeName: string;
+    mergeMbid: string;
+    mergeAlbums: number;
+    mergeOwned: number;
+    similarity: number; // 0-100
+    matchType: "exact_key" | "fuzzy";
+}
+
+export interface Anomaly {
+    key: string;
+    type: "duplicate_artist";
+    severity: "info" | "warning";
+    summary: string;
+    suggestedAction: "merge_artists";
+    data: DuplicateArtistData;
+}
+
 // New Mood Bucket Types (simplified mood system)
 export type MoodType =
     | "happy"
@@ -1053,6 +1079,25 @@ class ApiClient {
         return this.request<any>("/system-settings/test-lastfm", {
             method: "POST",
             body: JSON.stringify({ apiKey, apiSecret }),
+        });
+    }
+
+    // ── Library Health (admin anomaly detection + remediation) ──────────────
+    async getLibraryHealth(): Promise<{ anomalies: Anomaly[] }> {
+        return this.request<{ anomalies: Anomaly[] }>("/system-settings/library-health");
+    }
+
+    async mergeArtists(keepId: string, mergeId: string) {
+        return this.request<{ success: boolean; result: { keptName: string; movedAlbums: number; movedOwned: number } }>(
+            "/system-settings/library-health/merge-artists",
+            { method: "POST", body: JSON.stringify({ keepId, mergeId }) }
+        );
+    }
+
+    async ignoreAnomaly(key: string, type: string) {
+        return this.request<{ success: boolean }>("/system-settings/library-health/ignore", {
+            method: "POST",
+            body: JSON.stringify({ key, type }),
         });
     }
 

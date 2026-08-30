@@ -1006,3 +1006,14 @@ model Notification {
   @@index([userId, read])
   @@index([createdAt])
 }
+
+// Anomalies (e.g. likely-duplicate artists) that an admin has chosen to dismiss
+// on the Library Health screen, so detection stops surfacing them. `key` is the
+// stable anomaly id (e.g. "duplicate_artist:<tempArtistId>").
+model AnomalyIgnore {
+  key       String   @id
+  type      String
+  createdAt DateTime @default(now())
+
+  @@index([type])
+}

@@ -776,4 +776,82 @@ router.post("/clear-caches", async (req, res) => {
     }
 });
 
+// ── Library Health: anomaly detection + remediation (admin) ──────────────────
+
+// GET /system-settings/library-health — detected anomalies for admin review
+router.get("/library-health", async (req, res) => {
+    try {
+        const { detectAnomalies } = await import("../services/libraryHealth");
+        const anomalies = await detectAnomalies();
+        res.json({ anomalies });
+    } catch (error: any) {
+        console.error("[LibraryHealth] detection error:", error);
+        res.status(500).json({
+            error: "Failed to detect anomalies",
+            details: error.message,
+        });
+    }
+});
+
+// POST /system-settings/library-health/merge-artists — merge duplicate artists
+// Body: { keepId, mergeId }. keepId survives (its MBID/identity is retained);
+// mergeId is folded in and deleted. Uses the shared, atomic mergeArtistInto().
+router.post("/library-health/merge-artists", async (req, res) => {
+    try {
+        const { keepId, mergeId } = req.body || {};
+        if (!keepId || !mergeId) {
+            return res
+                .status(400)
+                .json({ error: "keepId and mergeId are required" });
+        }
+
+        const { mergeArtistInto } = await import("../services/artistMerge");
+        const result = await mergeArtistInto(keepId, mergeId);
+
+        // Drop cached artist/library data so the merge shows immediately.
+        // Excludes session keys so nobody is logged out.
+        try {
+            const { redisClient } = require("../utils/redis");
+            const keys: string[] = await redisClient.keys("*");
+            for (const k of keys) {
+                if (!k.startsWith("sess:")) await redisClient.del(k);
+            }
+        } catch (cacheErr) {
+            console.warn(
+                "[LibraryHealth] cache clear after merge failed:",
+                cacheErr
+            );
+        }
+
+        res.json({ success: true, result });
+    } catch (error: any) {
+        console.error("[LibraryHealth] merge error:", error);
+        res.status(500).json({
+            error: "Failed to merge artists",
+            details: error.message,
+        });
+    }
+});
+
+// POST /system-settings/library-health/ignore — dismiss an anomaly
+// Body: { key, type }. Persisted so detection stops surfacing it.
+router.post("/library-health/ignore", async (req, res) => {
+    try {
+        const { key, type } = req.body || {};
+        if (!key) return res.status(400).json({ error: "key is required" });
+        await prisma.anomalyIgnore.upsert({
+            where: { key },
+            create: { key, type: type || "unknown" },
+            update: {},
+        });
+        res.json({ success: true });
+    } catch (error: any) {
+        console.error("[LibraryHealth] ignore error:", error);
+        res.status(500).json({
+            error: "Failed to ignore anomaly",
+            details: error.message,
+        });
+    }
+});
+
 export default router;

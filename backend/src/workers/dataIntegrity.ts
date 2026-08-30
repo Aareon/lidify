@@ -15,18 +15,8 @@ import { prisma } from "../utils/db";
 import { config } from "../config";
 import * as fs from "fs";
 import * as path from "path";
-import { normalizeArtistName, looseArtistKey } from "../utils/artistNormalization";
-
-/**
- * Choose the better display name for a surviving merged artist. Prefers proper
- * casing and meaningful punctuation, so "J. Cole" wins over "J Cole". On a tie
- * keeps the first argument (the surviving real-MBID artist's existing name).
- */
-function pickBetterArtistName(current: string, candidate: string): string {
-    const score = (n: string) =>
-        (/[A-Z]/.test(n) ? 2 : 0) + (/[.\-'&/]/.test(n) ? 1 : 0);
-    return score(candidate) > score(current) ? candidate : current;
-}
+import { looseArtistKey } from "../utils/artistNormalization";
+import { mergeArtistInto } from "../services/artistMerge";
 
 interface IntegrityReport {
     expiredExclusions: number;
@@ -294,16 +284,17 @@ export async function runDataIntegrityCheck(): Promise<IntegrityReport> {
         );
     }
 
-    // 7. Consolidate duplicate artists: a placeholder (temp-MBID) row and a
-    // real-MBID row that are the same artist. Matches on a punctuation/whitespace-
-    // insensitive key (looseArtistKey) so splits differing only by a period or
-    // spacing — "J. Cole" vs "J Cole" — are caught, which the old exact
-    // normalizedName match missed. Migrates albums AND OwnedAlbum rows (which
-    // cascade-delete with the artist, so they must move first or the merged
-    // albums silently lose "owned" status), and keeps the better display name.
+    // 7. Consolidate HIGH-CONFIDENCE duplicate artists automatically: a
+    // placeholder (temp-MBID) row and a real-MBID row that are the same artist,
+    // matched on a punctuation/whitespace-insensitive key (looseArtistKey) so
+    // splits differing only by a period or spacing — "J. Cole" vs "J Cole" — are
+    // caught. Only EXACT loose-key matches auto-merge here (zero ambiguity);
+    // fuzzy/typo duplicates (e.g. "Nickleback" vs "Nickelback") are left for an
+    // admin to confirm on the Library Health screen (see services/libraryHealth).
+    // The merge itself is the shared, atomic mergeArtistInto() used by both paths.
     const tempArtists = await prisma.artist.findMany({
         where: { mbid: { startsWith: "temp-" } },
-        include: { albums: true },
+        select: { id: true, name: true },
     });
 
     // Load real-MBID artists once and index them by loose key.
@@ -324,61 +315,18 @@ export async function runDataIntegrityCheck(): Promise<IntegrityReport> {
         const realArtist = realByKey.get(key);
         if (!realArtist) continue;
 
-        const bestName = pickBetterArtistName(realArtist.name, tempArtist.name);
-
-        await prisma.$transaction(async (tx) => {
-            // Move albums to the real artist
-            await tx.album.updateMany({
-                where: { artistId: tempArtist.id },
-                data: { artistId: realArtist.id },
-            });
-
-            // Migrate ownership rows. OwnedAlbum PK is (artistId, rgMbid); drop any
-            // temp rows that would collide with an existing real row, then move the rest.
-            const realOwned = await tx.ownedAlbum.findMany({
-                where: { artistId: realArtist.id },
-                select: { rgMbid: true },
-            });
-            const realRgMbids = realOwned.map((o) => o.rgMbid);
-            if (realRgMbids.length > 0) {
-                await tx.ownedAlbum.deleteMany({
-                    where: { artistId: tempArtist.id, rgMbid: { in: realRgMbids } },
-                });
-            }
-            await tx.ownedAlbum.updateMany({
-                where: { artistId: tempArtist.id },
-                data: { artistId: realArtist.id },
-            });
-
-            // Drop SimilarArtist relations referencing the temp artist (they regenerate)
-            await tx.similarArtist.deleteMany({
-                where: {
-                    OR: [
-                        { fromArtistId: tempArtist.id },
-                        { toArtistId: tempArtist.id },
-                    ],
-                },
-            });
-
-            // Delete the temp artist (OwnedAlbum cascade is now harmless — none remain)
-            await tx.artist.delete({ where: { id: tempArtist.id } });
-
-            // Adopt the better display name on the surviving real-MBID artist
-            if (bestName !== realArtist.name) {
-                await tx.artist.update({
-                    where: { id: realArtist.id },
-                    data: {
-                        name: bestName,
-                        normalizedName: normalizeArtistName(bestName),
-                    },
-                });
-            }
-        });
-
-        report.consolidatedArtists++;
-        console.log(
-            `     Consolidated "${tempArtist.name}" (temp) into "${bestName}" (real MBID)`
-        );
+        try {
+            await mergeArtistInto(realArtist.id, tempArtist.id);
+            report.consolidatedArtists++;
+            console.log(
+                `     Consolidated "${tempArtist.name}" (temp) into "${realArtist.name}" (real MBID)`
+            );
+        } catch (err) {
+            console.error(
+                `     Failed to consolidate "${tempArtist.name}":`,
+                err
+            );
+        }
     }
 
     // 8. Clean up orphaned artists (no albums)

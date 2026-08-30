@@ -20,6 +20,7 @@ import { SubsonicSection } from "@/features/settings/components/sections/Subsoni
 import { LidarrSection } from "@/features/settings/components/sections/LidarrSection";
 import { SoulseekSection } from "@/features/settings/components/sections/SoulseekSection";
 import { AIServicesSection } from "@/features/settings/components/sections/AIServicesSection";
+import { LibraryHealthSection } from "@/features/settings/components/sections/LibraryHealthSection";
 import { ArtworkSection } from "@/features/settings/components/sections/ArtworkSection";
 import { StoragePathsSection } from "@/features/settings/components/sections/StoragePathsSection";
 import { CacheSection } from "@/features/settings/components/sections/CacheSection";
@@ -41,6 +42,7 @@ const sidebarItems: SidebarItem[] = [
     // System (admin)
     { id: "storage", label: "Storage", adminOnly: true },
     { id: "cache", label: "Cache & Automation", adminOnly: true },
+    { id: "library-health", label: "Library Health", adminOnly: true },
     { id: "library", label: "Library Management", adminOnly: true },
     { id: "users", label: "User Management", adminOnly: true },
 ];
@@ -224,6 +226,9 @@ export default function SettingsPage() {
                             settings={systemSettings}
                             onUpdate={updateSystemSettings}
                         />
+
+                        {/* Library Health - anomaly detection & remediation */}
+                        <LibraryHealthSection />
 
                         {/* Library Management */}
                         <LibrarySection />

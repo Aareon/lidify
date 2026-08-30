@@ -149,6 +149,19 @@ export function areArtistNamesSimilar(
 }
 
 /**
+ * Fuzzy similarity (0-100) between two artist names after normalization.
+ * Exposes the raw score so callers can rank candidates and apply ambiguity
+ * guards (e.g. duplicate-artist consolidation). "Nickleback" vs "Nickelback"
+ * scores ~90 (a letter transposition); an exact normalized match returns 100.
+ */
+export function artistNameSimilarity(name1: string, name2: string): number {
+    const n1 = normalizeArtistName(name1);
+    const n2 = normalizeArtistName(name2);
+    if (n1 === n2) return 100;
+    return fuzz.ratio(n1, n2);
+}
+
+/**
  * Find the best matching artist from a list of candidates
  * @param targetName The name to match
  * @param candidates List of candidate artist names
