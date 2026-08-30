@@ -11,6 +11,7 @@ import {
     SkipBack,
     SkipForward,
     ChevronDown,
+    ListMusic,
     Music as MusicIcon,
     Shuffle,
     Repeat,
@@ -581,6 +582,20 @@ export function OverlayPlayer() {
                             ) : (
                                 <AudioWaveform className="w-5 h-5" />
                             )}
+                        </button>
+
+                        {/* View / edit play queue */}
+                        <button
+                            onClick={() =>
+                                window.dispatchEvent(
+                                    new CustomEvent("toggle-queue-panel")
+                                )
+                            }
+                            className="text-gray-500 hover:text-white transition-colors"
+                            title="Queue"
+                            aria-label="View queue"
+                        >
+                            <ListMusic className="w-5 h-5" />
                         </button>
 
                         {/* Device Selector for remote playback */}

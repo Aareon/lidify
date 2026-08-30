@@ -5,6 +5,7 @@ import { useIsMobile, useIsTablet } from "@/hooks/useMediaQuery";
 import { MiniPlayer } from "./MiniPlayer";
 import { FullPlayer } from "./FullPlayer";
 import { OverlayPlayer } from "./OverlayPlayer";
+import { QueuePanel } from "./QueuePanel";
 
 /**
  * UniversalPlayer - Manages player UI rendering based on mode and device
@@ -38,6 +39,10 @@ export function UniversalPlayer() {
                 /* Desktop: always show full-width bottom player */
                 <FullPlayer />
             )}
+
+            {/* View/edit queue drawer — opened by the queue button on any player
+                variant via the `toggle-queue-panel` window event. */}
+            <QueuePanel />
         </>
     );
 }

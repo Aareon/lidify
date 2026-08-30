@@ -15,6 +15,7 @@ import {
     Volume2,
     VolumeX,
     Maximize2,
+    ListMusic,
     Music as MusicIcon,
     Shuffle,
     Repeat,
@@ -666,6 +667,20 @@ export function FullPlayer() {
                             className="w-full h-1 bg-white/[0.15] rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer [&::-webkit-slider-thumb]:shadow-lg [&::-webkit-slider-thumb]:shadow-white/30 [&::-webkit-slider-thumb]:transition-all [&::-webkit-slider-thumb]:hover:scale-110"
                         />
                     </div>
+
+                    {/* View / edit play queue */}
+                    <button
+                        onClick={() =>
+                            window.dispatchEvent(
+                                new CustomEvent("toggle-queue-panel")
+                            )
+                        }
+                        className="text-gray-400 hover:text-white transition-all duration-200 hover:scale-110"
+                        title="Queue"
+                        aria-label="View queue"
+                    >
+                        <ListMusic className="w-[18px] h-[18px]" />
+                    </button>
 
                     {/* Remote Playback Device Selector */}
                     <DeviceSelector />
