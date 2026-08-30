@@ -854,4 +854,45 @@ router.post("/library-health/ignore", async (req, res) => {
     }
 });
 
+// POST /system-settings/library-health/reenrich — resolve a temp-MBID artist
+// against MusicBrainz (assign a real MBID) and refresh its metadata.
+// Body: { artistId }. Reuses the same enrichment path as the background worker.
+router.post("/library-health/reenrich", async (req, res) => {
+    try {
+        const { artistId } = req.body || {};
+        if (!artistId) {
+            return res.status(400).json({ error: "artistId is required" });
+        }
+
+        const artist = await prisma.artist.findUnique({ where: { id: artistId } });
+        if (!artist) {
+            return res.status(404).json({ error: "Artist not found" });
+        }
+
+        const { enrichSimilarArtist } = await import("../workers/artistEnrichment");
+        await enrichSimilarArtist(artist);
+
+        const after = await prisma.artist.findUnique({
+            where: { id: artistId },
+            select: { mbid: true },
+        });
+        const resolved = !!after && !after.mbid.startsWith("temp-");
+
+        res.json({
+            success: true,
+            resolved,
+            mbid: after?.mbid ?? null,
+            message: resolved
+                ? "Resolved to a real MusicBrainz ID and refreshed metadata"
+                : "No MusicBrainz match found — the artist still has no real ID",
+        });
+    } catch (error: any) {
+        console.error("[LibraryHealth] reenrich error:", error);
+        res.status(500).json({
+            error: "Failed to re-enrich artist",
+            details: error?.message || "Enrichment failed",
+        });
+    }
+});
+
 export default router;

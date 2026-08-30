@@ -78,7 +78,14 @@ export interface DuplicateArtistData {
     matchType: "exact_key" | "fuzzy";
 }
 
-export interface Anomaly {
+export interface MissingMbidData {
+    artistId: string;
+    artistName: string;
+    albums: number;
+    owned: number;
+}
+
+export interface DuplicateArtistAnomaly {
     key: string;
     type: "duplicate_artist";
     severity: "info" | "warning";
@@ -86,6 +93,17 @@ export interface Anomaly {
     suggestedAction: "merge_artists";
     data: DuplicateArtistData;
 }
+
+export interface MissingMbidAnomaly {
+    key: string;
+    type: "missing_mbid";
+    severity: "info" | "warning";
+    summary: string;
+    suggestedAction: "reenrich_artist";
+    data: MissingMbidData;
+}
+
+export type Anomaly = DuplicateArtistAnomaly | MissingMbidAnomaly;
 
 // New Mood Bucket Types (simplified mood system)
 export type MoodType =
@@ -1099,6 +1117,13 @@ class ApiClient {
             method: "POST",
             body: JSON.stringify({ key, type }),
         });
+    }
+
+    async reenrichArtist(artistId: string) {
+        return this.request<{ success: boolean; resolved: boolean; mbid: string | null; message: string }>(
+            "/system-settings/library-health/reenrich",
+            { method: "POST", body: JSON.stringify({ artistId }) }
+        );
     }
 
     // Check if OpenRouter API key is configured via environment variable
