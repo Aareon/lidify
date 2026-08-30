@@ -12,6 +12,7 @@ import {
     Library,
     Mic2,
     LayoutGrid,
+    Download,
     Plus,
 } from "lucide-react";
 import { cn } from "@/utils/cn";
@@ -182,6 +183,21 @@ export function MobileSidebar({ isOpen, onClose }: MobileSidebarProps) {
                                     Beta
                                 </span>
                             </div>
+                        </Link>
+
+                        <Link
+                            href="/import/spotify"
+                            className={cn(
+                                "flex items-center gap-3 px-3 py-3 rounded-lg transition-colors",
+                                pathname.startsWith("/import")
+                                    ? "bg-white/10 text-white"
+                                    : "text-gray-400 hover:text-white hover:bg-white/5"
+                            )}
+                        >
+                            <Download className="w-5 h-5" />
+                            <span className="text-[15px] font-medium">
+                                Import
+                            </span>
                         </Link>
                     </div>
 

@@ -349,6 +349,19 @@ function SpotifyImportPageContent() {
                     </p>
                 </div>
 
+                {/* Bulk offline import from Spotify data export */}
+                <div className="mb-6 p-4 bg-white/5 rounded-lg border border-white/10">
+                    <p className="text-sm text-gray-300">
+                        Rebuilding your whole Spotify library?{" "}
+                        <Link
+                            href="/import/spotify/export"
+                            className="text-brand hover:underline font-medium"
+                        >
+                            Bulk-import all playlists from your data export →
+                        </Link>
+                    </p>
+                </div>
+
                 {/* Step: Input */}
                 {step === "input" && (
                     <div className="space-y-4">

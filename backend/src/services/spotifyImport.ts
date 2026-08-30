@@ -1017,6 +1017,51 @@ class SpotifyImportService {
     }
 
     /**
+     * Generate a preview from an offline track list — e.g. a playlist parsed from
+     * a Spotify "Download your data" export (Playlist1.json). Matching is by
+     * artist + title (+ album), so the export's names are all that's needed.
+     */
+    async generatePreviewFromOfflineTracks(
+        playlistName: string,
+        tracks: Array<{
+            title: string;
+            artist: string;
+            album?: string | null;
+            uri?: string | null;
+        }>,
+        playlistId: string
+    ): Promise<ImportPreview> {
+        const spotifyTracks: SpotifyTrack[] = tracks.map((track, index) => ({
+            // Spotify track URIs look like "spotify:track:<id>"; fall back to a
+            // synthetic id so ordering/dedup still works if the uri is missing.
+            spotifyId: track.uri?.split(":").pop() || `offline-${index}`,
+            title: track.title,
+            artist: track.artist,
+            artistId: "",
+            album: track.album || "Unknown Album",
+            albumId: "",
+            isrc: null,
+            durationMs: 0,
+            trackNumber: index + 1,
+            previewUrl: null,
+            coverUrl: null,
+        }));
+
+        return this.buildPreviewFromTracklist(
+            spotifyTracks,
+            {
+                id: playlistId,
+                name: playlistName,
+                description: null,
+                owner: "Spotify Export",
+                imageUrl: null,
+                trackCount: spotifyTracks.length,
+            },
+            "Spotify"
+        );
+    }
+
+    /**
      * Start an import job
      * @param skipDownload - If true, just save playlist without downloading missing tracks
      */

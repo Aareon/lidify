@@ -23,7 +23,10 @@ services:
     container_name: lidify-init-permissions
     volumes:
       - ${LIDIFY_APPDATA:-/mnt/user/appdata/lidify}:/data
-    command: ["sh", "-c", "mkdir -p /data/redis /data/postgres && chmod -R 777 /data"]
+      - ${LIDIFY_DOWNLOADS:-/mnt/user/downloads/lidify}:/downloads
+    # Also create+chmod the downloads dir so the app (uid 1000) can write track
+    # downloads there. Without this, mkdir under /downloads fails with EACCES.
+    command: ["sh", "-c", "mkdir -p /data/redis /data/postgres /downloads && chmod -R 777 /data && chmod 777 /downloads"]
     restart: "no"
 
   lidify:
@@ -43,6 +46,9 @@ services:
     volumes:
       - ${MUSIC_PATH:-/mnt/user/media/music}:/music
       - ${LIDIFY_APPDATA:-/mnt/user/appdata/lidify}:/data
+      # Downloaded tracks (Soulseek / YouTube). Must be a real, writable mount —
+      # the downloadPath setting (/downloads) points here. See KNOWN_ISSUES.md.
+      - ${LIDIFY_DOWNLOADS:-/mnt/user/downloads/lidify}:/downloads
     environment:
       - TZ=${TZ:-America/Chicago}
       - NVIDIA_VISIBLE_DEVICES=all

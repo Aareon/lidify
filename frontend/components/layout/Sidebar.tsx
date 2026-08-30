@@ -31,6 +31,7 @@ const navigation: NavigationItem[] = [
     { name: "Discovery", href: "/discover" },
     { name: "Podcasts", href: "/podcasts" },
     { name: "Browse", href: "/browse/playlists" },
+    { name: "Import", href: "/import/spotify" },
 ];
 
 interface Playlist {

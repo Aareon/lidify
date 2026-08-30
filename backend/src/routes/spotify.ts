@@ -27,6 +27,24 @@ const importSchema = z.object({
     skipDownload: z.boolean().optional(),
 });
 
+// Offline import from a Spotify "Download your data" export (Playlist1.json).
+// The client parses the file and posts one playlist's tracks at a time.
+const offlineImportSchema = z.object({
+    playlistName: z.string().min(1).max(200),
+    tracks: z
+        .array(
+            z.object({
+                title: z.string().min(1),
+                artist: z.string().min(1),
+                album: z.string().nullable().optional(),
+                uri: z.string().nullable().optional(),
+            })
+        )
+        .min(1)
+        .max(10000),
+    skipDownload: z.boolean().optional(),
+});
+
 /**
  * POST /api/spotify/parse
  * Parse a Spotify URL and return basic info
@@ -225,6 +243,54 @@ router.post("/import", async (req, res) => {
         }
         res.status(500).json({
             error: error.message || "Failed to start import",
+        });
+    }
+});
+
+/**
+ * POST /api/spotify/import/offline
+ * Import ONE playlist from a Spotify data export (client parses the file and
+ * posts each playlist's tracks). Reuses the same match/download/create pipeline
+ * as the URL importer.
+ */
+router.post("/import/offline", async (req, res) => {
+    try {
+        const { playlistName, tracks, skipDownload } =
+            offlineImportSchema.parse(req.body);
+        const userId = req.user!.id;
+
+        const spotifyPlaylistId = `offline-${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 8)}`;
+
+        const preview =
+            await spotifyImportService.generatePreviewFromOfflineTracks(
+                playlistName,
+                tracks,
+                spotifyPlaylistId
+            );
+
+        const job = await spotifyImportService.startImport(
+            userId,
+            spotifyPlaylistId,
+            playlistName,
+            preview,
+            skipDownload ?? false
+        );
+
+        res.json({
+            jobId: job.id,
+            status: job.status,
+            summary: preview.summary,
+            message: "Import started",
+        });
+    } catch (error: any) {
+        console.error("Spotify offline import error:", error);
+        if (error.name === "ZodError") {
+            return res.status(400).json({ error: "Invalid request body" });
+        }
+        res.status(500).json({
+            error: error.message || "Failed to start offline import",
         });
     }
 });
