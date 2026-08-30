@@ -144,21 +144,51 @@ export const slskdClient = {
     },
 
     /**
-     * Push Soulseek credentials into slskd's live config (remote configuration)
-     * so saving them in Lidify's web app connects immediately — no container
-     * restart. slskd's config precedence is env > yaml, so the compose file must
-     * NOT set SLSKD_SLSK_USERNAME/PASSWORD (env would shadow this yaml).
-     *
-     * Writes a minimal yaml containing only the soulseek credentials; everything
-     * else (shares, downloads, listen port) comes from env and is unaffected.
+     * The fixed subdirectory under slskd's downloads dir where completed files
+     * land. Lidify looks here to locate a finished download and move it to the
+     * caller's destPath. Kept literal (not a slskd template) so the path is
+     * deterministic: `<downloads>/<INCOMING_SUBDIR>/<basename>`.
      */
-    async setCredentials(username: string, password: string): Promise<void> {
+    INCOMING_SUBDIR: "_incoming",
+
+    /**
+     * Push Lidify-managed settings into slskd's live config (remote
+     * configuration) so a save in the web app applies immediately — no restart.
+     *
+     * Manages the soulseek credentials, upload slots/speed limit, and the fixed
+     * download destination subdirectory. slskd's config precedence is env > yaml,
+     * so the compose file must NOT set SLSKD_SLSK_USERNAME/PASSWORD (env would
+     * shadow these). Everything else (shares, downloads dir, listen port) comes
+     * from env and is untouched. Each PUT replaces the whole managed yaml, so all
+     * managed keys are written together here.
+     */
+    async applyConfig(cfg: {
+        username: string;
+        password: string;
+        uploadSlots?: number;
+        uploadSpeedLimitKbps?: number;
+    }): Promise<void> {
         // YAML double-quoted scalar: escape backslash and double-quote.
         const q = (s: string) =>
             '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
-        const yaml = `soulseek:\n  username: ${q(username)}\n  password: ${q(
-            password
-        )}\n`;
+        const slots = Math.max(1, Math.min(50, cfg.uploadSlots ?? 2));
+        // slskd speed_limit is in kibibytes; there's no true "unlimited", so 0
+        // maps to a very large cap.
+        const speed =
+            cfg.uploadSpeedLimitKbps && cfg.uploadSpeedLimitKbps > 0
+                ? cfg.uploadSpeedLimitKbps
+                : 1000000;
+        const yaml =
+            `soulseek:\n` +
+            `  username: ${q(cfg.username)}\n` +
+            `  password: ${q(cfg.password)}\n` +
+            `transfers:\n` +
+            `  upload:\n` +
+            `    slots: ${slots}\n` +
+            `    speed_limit: ${speed}\n` +
+            `  download:\n` +
+            `    destination:\n` +
+            `      subdirectory: ${q(this.INCOMING_SUBDIR)}\n`;
         // Validate, then apply. Body is the JSON-encoded yaml string.
         await request("/options/yaml/validate", {
             method: "POST",
@@ -245,9 +275,39 @@ export const slskdClient = {
         ).then(() => undefined);
     },
 
-    /** All current/recent download transfers, flattened across users. */
+    /** All current/recent download transfers (grouped by user→directories→files). */
     getDownloads(): Promise<unknown> {
         return request("/transfers/downloads");
+    },
+
+    /** Find a specific download transfer by user + remote filename, or null. */
+    async getDownloadTransfer(
+        username: string,
+        filename: string
+    ): Promise<SlskdTransfer | null> {
+        const all = (await this.getDownloads().catch(() => [])) as any[];
+        for (const u of all || []) {
+            for (const d of u?.directories || []) {
+                for (const f of d?.files || []) {
+                    if (f?.username === username && f?.filename === filename) {
+                        return f as SlskdTransfer;
+                    }
+                }
+            }
+        }
+        return null;
+    },
+
+    /** Cancel (and by default remove) a download transfer. Best-effort. */
+    async cancelDownload(
+        username: string,
+        id: string,
+        remove = true
+    ): Promise<void> {
+        await request(
+            `/transfers/downloads/${encodeURIComponent(username)}/${id}?remove=${remove}`,
+            { method: "DELETE" }
+        ).catch(() => undefined);
     },
 
     /** All current/recent upload transfers (what we're serving to peers). */

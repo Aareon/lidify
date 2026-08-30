@@ -3,13 +3,17 @@
  * Replaces the SLSKD Docker container with native Node.js connection
  */
 
-import { SlskClient } from "soulseek-ts";
 import path from "path";
 import fs from "fs";
 import PQueue from "p-queue";
 import { getSystemSettings } from "../utils/systemSettings";
 import { sessionLog } from "../utils/playlistLogger";
 import { redisClient } from "../utils/redis";
+import { slskdClient } from "./slskdClient";
+
+// Where slskd writes finished downloads inside its downloads dir (shared with
+// Lidify at /downloads). Files land at `${downloadPath}/${INCOMING}/<basename>`.
+const SLSKD_INCOMING = "_incoming";
 
 // Debug mode for verbose search/ranking logs
 const SOULSEEK_DEBUG = process.env.SOULSEEK_DEBUG === "true";
@@ -235,7 +239,10 @@ export interface SearchTrackResult {
 }
 
 class SoulseekService {
-    private client: SlskClient | null = null;
+    // Legacy soulseek-ts client field, retained only so existing guards/counters
+    // compile after the slskd cutover. Never instantiated now — slskd is the
+    // engine. See slskdClient + the slskd* helpers below.
+    private client: any = null;
     private connecting = false;
     private connectPromise: Promise<void> | null = null;
     private lastConnectAttempt = 0;
@@ -456,33 +463,9 @@ class SoulseekService {
      * Connect to Soulseek network
      */
     async connect(): Promise<void> {
-        const settings = await getSystemSettings();
-
-        if (!settings?.soulseekUsername || !settings?.soulseekPassword) {
-            throw new Error("Soulseek credentials not configured");
-        }
-
-        sessionLog("SOULSEEK", `Connecting as ${settings.soulseekUsername}...`);
-        try {
-            const client = new SlskClient();
-            await client.login(
-                settings.soulseekUsername,
-                settings.soulseekPassword
-            );
-            this.client = client;
-            this.connectedAt = new Date();
-            this.consecutiveEmptySearches = 0;
-            this.consecutiveErrors = 0;
-            sessionLog("SOULSEEK", "Connected to Soulseek network");
-        } catch (err: any) {
-            sessionLog(
-                "SOULSEEK",
-                `Connection failed: ${err.message}`,
-                "ERROR"
-            );
-            this.client = null;
-            throw err;
-        }
+        // slskd owns the Soulseek connection now. Just nudge it to connect;
+        // credentials live in slskd's config (pushed from Settings save/Test).
+        await slskdClient.connect();
     }
 
     /**
@@ -507,74 +490,162 @@ class SoulseekService {
      * Ensure we have an active connection
      * @param force - If true, disconnect and reconnect even if client exists
      */
-    private async ensureConnected(force: boolean = false): Promise<void> {
-        if (force && this.client) {
-            this.forceDisconnect();
+    private async ensureConnected(_force: boolean = false): Promise<void> {
+        // slskd manages the Soulseek connection. Just make sure the sidecar is
+        // reachable; if it's up but not connected, nudge it (best-effort).
+        if (!(await slskdClient.isReachable())) {
+            throw new Error("slskd sidecar not reachable");
         }
-
-        if (this.client && this.client.loggedIn) {
-            return;
-        }
-
-        if (this.client && !this.client.loggedIn) {
-            this.forceDisconnect();
-        }
-
-        // Prevent multiple simultaneous connection attempts
-        if (this.connecting && this.connectPromise) {
-            return this.connectPromise;
-        }
-
-        // Cooldown between reconnect attempts (skip if forced)
-        const now = Date.now();
-        if (!force && now - this.lastConnectAttempt < this.RECONNECT_COOLDOWN) {
-            throw new Error(
-                "Connection cooldown - please wait before retrying"
-            );
-        }
-
-        this.connecting = true;
-        this.lastConnectAttempt = now;
-
-        this.connectPromise = this.connect().finally(() => {
-            this.connecting = false;
-            this.connectPromise = null;
-        });
-
-        return this.connectPromise;
-    }
-
-    /**
-     * Check if connected to Soulseek
-     */
-    isConnected(): boolean {
-        return Boolean(this.client && this.client.loggedIn);
-    }
-
-    /**
-     * Check if Soulseek is available (credentials configured)
-     */
-    async isAvailable(): Promise<boolean> {
         try {
-            const settings = await getSystemSettings();
-            return !!(settings?.soulseekUsername && settings?.soulseekPassword);
+            const state = await slskdClient.getServerState();
+            if (!(state.isConnected && state.isLoggedIn)) {
+                await slskdClient.connect().catch(() => undefined);
+            }
+        } catch {
+            // Reachable but state check failed — let the caller proceed and fail
+            // on the actual search/download if truly disconnected.
+        }
+    }
+
+    /**
+     * Check if connected to Soulseek (via slskd). Async now; kept for callers
+     * that await it. Returns false on any error.
+     */
+    async isConnected(): Promise<boolean> {
+        try {
+            const s = await slskdClient.getServerState();
+            return Boolean(s.isConnected && s.isLoggedIn);
         } catch {
             return false;
         }
     }
 
     /**
-     * Get connection status
+     * Available when credentials are configured AND the slskd sidecar is up.
+     */
+    async isAvailable(): Promise<boolean> {
+        try {
+            const settings = await getSystemSettings();
+            if (!(settings?.soulseekUsername && settings?.soulseekPassword)) {
+                return false;
+            }
+            return await slskdClient.isReachable();
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Get connection status from slskd.
      */
     async getStatus(): Promise<{
         connected: boolean;
         username: string | null;
     }> {
         const settings = await getSystemSettings();
+        let connected = false;
+        try {
+            const s = await slskdClient.getServerState();
+            connected = Boolean(s.isConnected && s.isLoggedIn);
+        } catch {
+            // sidecar unreachable → not connected
+        }
         return {
-            connected: Boolean(this.client && this.client.loggedIn),
+            connected,
             username: settings?.soulseekUsername || null,
         };
+    }
+
+    /**
+     * Run a search via slskd and map its responses to the flattened SearchResult
+     * shape the ranking pipeline expects. Drop-in for the old
+     * client.search()+flattenSearchResults() path.
+     */
+    private async slskdSearch(
+        query: string,
+        timeoutMs: number
+    ): Promise<SearchResult[]> {
+        const responses = await slskdClient.search(query, { timeoutMs });
+        const out: SearchResult[] = [];
+        for (const r of responses || []) {
+            for (const f of r.files || []) {
+                if ((f as any).isLocked) continue;
+                out.push({
+                    user: r.username,
+                    file: f.filename,
+                    size: Number(f.size) || 0,
+                    slots: Boolean(r.hasFreeUploadSlot),
+                    bitrate:
+                        typeof (f as any).bitRate === "number"
+                            ? (f as any).bitRate
+                            : undefined,
+                    speed: Number(r.uploadSpeed) || 0,
+                });
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Recursively find the newest file matching `base` (basename) under `dir`.
+     */
+    private findFileByBasename(dir: string, base: string): string | null {
+        let best: { p: string; m: number } | null = null;
+        try {
+            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                const p = path.join(dir, e.name);
+                if (e.isDirectory()) {
+                    const r = this.findFileByBasename(p, base);
+                    if (r) {
+                        const m = fs.statSync(r).mtimeMs;
+                        if (!best || m > best.m) best = { p: r, m };
+                    }
+                } else if (e.name === base) {
+                    const m = fs.statSync(p).mtimeMs;
+                    if (!best || m > best.m) best = { p, m };
+                }
+            }
+        } catch {
+            // dir missing / unreadable
+        }
+        return best?.p ?? null;
+    }
+
+    /**
+     * Locate a completed slskd download on disk and move it to destPath. slskd
+     * writes to `${downloadBase}/${SLSKD_INCOMING}/<basename>`; fall back to a
+     * recursive search by basename if the layout differs.
+     */
+    private async locateAndMove(
+        remoteFilename: string,
+        downloadBase: string,
+        destPath: string
+    ): Promise<boolean> {
+        const base = path.basename(remoteFilename.replace(/\\/g, "/"));
+        const incoming = path.join(downloadBase, SLSKD_INCOMING);
+        const primary = path.join(incoming, base);
+        let src: string | null = fs.existsSync(primary) ? primary : null;
+        if (!src) src = this.findFileByBasename(incoming, base);
+        if (!src) src = this.findFileByBasename(downloadBase, base);
+        if (!src) return false;
+        try {
+            fs.mkdirSync(path.dirname(destPath), { recursive: true });
+            try {
+                fs.renameSync(src, destPath);
+            } catch {
+                // Cross-device or other rename failure → copy + unlink.
+                fs.copyFileSync(src, destPath);
+                fs.unlinkSync(src);
+            }
+            return true;
+        } catch (e: any) {
+            sessionLog(
+                "SOULSEEK",
+                `Failed to move ${src} -> ${destPath}: ${e.message}`,
+                "WARN"
+            );
+            return false;
+        }
     }
 
     /**
@@ -604,16 +675,7 @@ class SoulseekService {
         } catch (err: any) {
             sessionLog(
                 "SOULSEEK",
-                `[Search #${searchId}] Connection error: ${err.message}`,
-                "ERROR"
-            );
-            return { found: false, bestMatch: null, allMatches: [] };
-        }
-
-        if (!this.client) {
-            sessionLog(
-                "SOULSEEK",
-                `[Search #${searchId}] Client not connected`,
+                `[Search #${searchId}] slskd not ready: ${err.message}`,
                 "ERROR"
             );
             return { found: false, bestMatch: null, allMatches: [] };
@@ -701,11 +763,8 @@ class SoulseekService {
         );
         try {
             const searchStartTime = Date.now();
-            const rawResults = await this.client.search(query, {
-                timeout: timeoutMs,
-            });
+            const results = await this.slskdSearch(query, timeoutMs);
             const searchDuration = Date.now() - searchStartTime;
-            const results = this.flattenSearchResults(rawResults);
 
             if (!results || results.length === 0) {
                 this.consecutiveEmptySearches++;
@@ -849,18 +908,11 @@ class SoulseekService {
             return [];
         }
 
-        if (!this.client) {
-            return [];
-        }
-
         // Rate limit: acquire token before searching
         await this.searchRateLimiter.acquire();
 
         try {
-            const rawResults = await this.client.search(query, {
-                timeout: 8000, // 8 seconds - most results arrive quickly
-            });
-            return this.flattenSearchResults(rawResults);
+            return await this.slskdSearch(query, 8000);
         } catch {
             return [];
         }
@@ -1152,205 +1204,22 @@ class SoulseekService {
             return { success: false, error: err.message };
         }
 
-        if (!this.client) {
-            return { success: false, error: "Not connected" };
-        }
-
-        // Ensure destination directory exists
-        const destDir = path.dirname(destPath);
-        if (!fs.existsSync(destDir)) {
-            fs.mkdirSync(destDir, { recursive: true });
-        }
+        const settings = await getSystemSettings();
+        const downloadBase = settings?.downloadPath || "/downloads";
+        fs.mkdirSync(path.dirname(destPath), { recursive: true });
 
         sessionLog(
             "SOULSEEK",
-            `Downloading from ${match.username}: ${match.filename} -> ${destPath}`
+            `Downloading from ${match.username}: ${match.filename} -> ${destPath} (slskd)`
         );
 
-        const result = await new Promise<{ success: boolean; error?: string }>((resolve) => {
-            let resolved = false;
-            let download: { stream: NodeJS.ReadableStream } | null = null;
-            let inactivityTimer: NodeJS.Timeout | null = null;
-            let connectionEstablished = false;
-
-            const clearTimers = () => {
-                if (inactivityTimer) {
-                    clearTimeout(inactivityTimer);
-                    inactivityTimer = null;
-                }
-            };
-
-            const resetInactivityTimer = () => {
-                clearTimers();
-                inactivityTimer = setTimeout(() => {
-                    if (!resolved) {
-                        resolved = true;
-                        sessionLog(
-                            "SOULSEEK",
-                            `Download stalled (no data for ${this.INACTIVITY_TIMEOUT / 1000}s): ${match.filename}`,
-                            "WARN"
-                        );
-                        if (fs.existsSync(destPath)) {
-                            try {
-                                fs.unlinkSync(destPath);
-                            } catch (e) {
-                                // Ignore cleanup errors
-                            }
-                        }
-                        if (download) {
-                            (download.stream as any).destroy?.(
-                                new Error("Download stalled")
-                            );
-                        }
-                        resolve({ success: false, error: "Download stalled - no data received" });
-                    }
-                }, this.INACTIVITY_TIMEOUT);
-            };
-
-            // Safety net timeout - absolute maximum
-            const maxTimeoutId = setTimeout(() => {
-                if (!resolved) {
-                    resolved = true;
-                    clearTimers();
-                    sessionLog(
-                        "SOULSEEK",
-                        `Download exceeded max time (${this.MAX_DOWNLOAD_TIMEOUT / 1000}s): ${match.filename}`,
-                        "WARN"
-                    );
-                    if (fs.existsSync(destPath)) {
-                        try {
-                            fs.unlinkSync(destPath);
-                        } catch (e) {
-                            // Ignore cleanup errors
-                        }
-                    }
-                    if (download) {
-                        (download.stream as any).destroy?.(
-                            new Error("Download timed out")
-                        );
-                    }
-                    resolve({ success: false, error: "Download exceeded maximum time" });
-                }
-            }, this.MAX_DOWNLOAD_TIMEOUT);
-
-            const finalize = (
-                success: boolean,
-                errorMessage?: string
-            ): void => {
-                if (resolved) return;
-                resolved = true;
-                clearTimers();
-                clearTimeout(maxTimeoutId);
-                if (!success && fs.existsSync(destPath)) {
-                    try {
-                        fs.unlinkSync(destPath);
-                    } catch {
-                        // Ignore cleanup errors
-                    }
-                }
-                if (success) {
-                    const stats = fs.existsSync(destPath)
-                        ? fs.statSync(destPath)
-                        : null;
-                    const actualSize = stats?.size || 0;
-                    const expectedSize = match.size;
-                    const MIN_FILE_SIZE = 10 * 1024; // 10KB minimum for any audio file
-                    
-                    // Validate file size - must be at least 10KB and within 20% of expected (if known)
-                    if (actualSize < MIN_FILE_SIZE) {
-                        sessionLog(
-                            "SOULSEEK",
-                            `Download too small (${Math.round(actualSize / 1024)}KB < 10KB): ${match.filename}`,
-                            "WARN"
-                        );
-                        try {
-                            fs.unlinkSync(destPath);
-                        } catch {
-                            // Ignore cleanup errors
-                        }
-                        resolve({ success: false, error: "Downloaded file too small (likely corrupted)" });
-                        return;
-                    }
-                    
-                    if (expectedSize > 0) {
-                        const sizeDiff = Math.abs(actualSize - expectedSize) / expectedSize;
-                        if (sizeDiff > 0.2) {
-                            sessionLog(
-                                "SOULSEEK",
-                                `Size mismatch: expected ${Math.round(expectedSize / 1024)}KB, got ${Math.round(actualSize / 1024)}KB (${Math.round(sizeDiff * 100)}% diff): ${match.filename}`,
-                                "WARN"
-                            );
-                            // Don't fail, just warn - metadata sizes can be inaccurate
-                        }
-                    }
-                    
-                    sessionLog(
-                        "SOULSEEK",
-                        `✓ Downloaded: ${match.filename} (${Math.round(actualSize / 1024)}KB)`
-                    );
-                    resolve({ success: true });
-                } else {
-                    sessionLog(
-                        "SOULSEEK",
-                        `Download failed: ${errorMessage || "unknown error"}`,
-                        "ERROR"
-                    );
-                    resolve({
-                        success: false,
-                        error: errorMessage || "Download failed",
-                    });
-                }
-            };
-
-            (async () => {
-                // Connection timeout - must establish connection within limit
-                const connectionTimeoutId = setTimeout(() => {
-                    if (!connectionEstablished && !resolved) {
-                        resolved = true;
-                        clearTimers();
-                        clearTimeout(maxTimeoutId);
-                        sessionLog(
-                            "SOULSEEK",
-                            `Connection timeout (${this.CONNECTION_TIMEOUT / 1000}s): ${match.filename}`,
-                            "WARN"
-                        );
-                        resolve({ success: false, error: "Connection timeout - peer not responding" });
-                    }
-                }, this.CONNECTION_TIMEOUT);
-
-                try {
-                    download = (await this.client!.download(
-                        match.username,
-                        match.fullPath
-                    )) as { stream: NodeJS.ReadableStream };
-                    
-                    // Connection established - clear connection timeout, start inactivity timer
-                    connectionEstablished = true;
-                    clearTimeout(connectionTimeoutId);
-                    resetInactivityTimer();
-
-                    const writeStream = fs.createWriteStream(destPath);
-
-                    // Reset inactivity timer on each data chunk
-                    download.stream.on("data", () => {
-                        resetInactivityTimer();
-                    });
-
-                    download.stream.on("error", (err: any) =>
-                        finalize(false, err?.message || "Stream error")
-                    );
-                    writeStream.on("error", (err) =>
-                        finalize(false, err.message)
-                    );
-                    writeStream.on("finish", () => finalize(true));
-
-                    download.stream.pipe(writeStream);
-                } catch (err: any) {
-                    clearTimeout(connectionTimeoutId);
-                    finalize(false, err?.message || "Download failed");
-                }
-            })();
-        });
+        const result = await this.slskdDownloadToDest(
+            match,
+            match.fullPath,
+            match.size || 0,
+            downloadBase,
+            destPath
+        );
 
         // Record reputation based on download result
         if (result.success) {
@@ -1360,6 +1229,102 @@ class SoulseekService {
         }
 
         return result;
+    }
+
+    /**
+     * Enqueue a download via slskd, wait for completion, then move the finished
+     * file to destPath. Mirrors the old per-source semantics so the caller's
+     * retry loop can move to the next source: give up (failure) if the transfer
+     * stays queued too long, stalls mid-transfer, or errors.
+     */
+    private async slskdDownloadToDest(
+        match: TrackMatch,
+        remote: string,
+        size: number,
+        downloadBase: string,
+        destPath: string
+    ): Promise<{ success: boolean; error?: string }> {
+        try {
+            await slskdClient.enqueueDownload(match.username, [
+                { filename: remote, size },
+            ]);
+        } catch (e: any) {
+            return {
+                success: false,
+                error: `enqueue failed: ${e?.message || e}`,
+            };
+        }
+
+        const startedAt = Date.now();
+        const MAX = this.MAX_DOWNLOAD_TIMEOUT; // absolute cap (5 min)
+        const QUEUE_WAIT = 45000; // give up queueing after 45s → next source
+        const INACT = this.INACTIVITY_TIMEOUT; // 30s no progress while transferring
+        let lastBytes = -1;
+        let lastProgressAt = Date.now();
+        let transferId: string | undefined;
+
+        while (Date.now() - startedAt < MAX) {
+            await new Promise((r) => setTimeout(r, 1500));
+            const t = await slskdClient.getDownloadTransfer(
+                match.username,
+                remote
+            );
+            if (!t) continue; // transfer not visible yet
+            transferId = t.id;
+            const state = String(t.state || "");
+            const bytes = Number((t as any).bytesTransferred || 0);
+            if (bytes !== lastBytes) {
+                lastBytes = bytes;
+                lastProgressAt = Date.now();
+            }
+            const transferring = /InProgress/i.test(state) || bytes > 0;
+
+            if (/Completed,\s*Succeeded/i.test(state)) {
+                const moved = await this.locateAndMove(
+                    remote,
+                    downloadBase,
+                    destPath
+                );
+                await slskdClient
+                    .cancelDownload(match.username, t.id)
+                    .catch(() => undefined);
+                if (moved) {
+                    sessionLog("SOULSEEK", `✓ Downloaded: ${match.filename}`);
+                    return { success: true };
+                }
+                return {
+                    success: false,
+                    error: "completed but file not found to move",
+                };
+            }
+            if (/Completed/i.test(state)) {
+                // Errored / Cancelled / Rejected / TimedOut
+                await slskdClient
+                    .cancelDownload(match.username, t.id)
+                    .catch(() => undefined);
+                return { success: false, error: `transfer ${state}` };
+            }
+            if (transferring) {
+                if (Date.now() - lastProgressAt > INACT) {
+                    await slskdClient
+                        .cancelDownload(match.username, t.id)
+                        .catch(() => undefined);
+                    return { success: false, error: "download stalled" };
+                }
+            } else if (Date.now() - startedAt > QUEUE_WAIT) {
+                // Still queued with no bytes after QUEUE_WAIT → move to next source.
+                await slskdClient
+                    .cancelDownload(match.username, t.id)
+                    .catch(() => undefined);
+                return { success: false, error: "still queued (no free slot)" };
+            }
+        }
+        if (transferId) {
+            await slskdClient
+                .cancelDownload(match.username, transferId)
+                .catch(() => undefined);
+        }
+        return { success: false, error: "download timed out" };
     }
 
     /**

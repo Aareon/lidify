@@ -252,12 +252,14 @@ router.post("/", async (req, res) => {
             try {
                 const { slskdClient } = await import("../services/slskdClient");
                 if (await slskdClient.isReachable()) {
-                    await slskdClient.setCredentials(
-                        data.soulseekUsername,
-                        data.soulseekPassword
-                    );
+                    await slskdClient.applyConfig({
+                        username: data.soulseekUsername,
+                        password: data.soulseekPassword,
+                        uploadSlots: data.soulseekUploadSlots,
+                        uploadSpeedLimitKbps: data.soulseekUploadSpeedLimitKbps,
+                    });
                     console.log(
-                        "[SLSKD] Pushed Soulseek credentials to sidecar (live)"
+                        "[SLSKD] Pushed Soulseek config to sidecar (live)"
                     );
                 }
             } catch (slskdError: any) {
@@ -667,7 +669,15 @@ router.post("/test-soulseek", async (req, res) => {
             });
         }
 
-        await slskdClient.setCredentials(username, password);
+        // Preserve the admin's configured upload slots/speed while testing creds.
+        const { getSystemSettings } = await import("../utils/systemSettings");
+        const current = await getSystemSettings().catch(() => null);
+        await slskdClient.applyConfig({
+            username,
+            password,
+            uploadSlots: current?.soulseekUploadSlots,
+            uploadSpeedLimitKbps: current?.soulseekUploadSpeedLimitKbps,
+        });
 
         // Poll slskd's server state for a successful login (up to ~15s).
         const deadline = Date.now() + 15000;
