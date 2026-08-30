@@ -13,6 +13,8 @@ interface SoulseekSharingSectionProps {
 
 interface SharingStatus {
     supported: boolean;
+    reachable: boolean;
+    connected: boolean;
     enabled: boolean;
     sharePath: string | null;
     uploadSlots: number;
@@ -30,15 +32,21 @@ export function SoulseekSharingSection({ settings, onUpdate }: SoulseekSharingSe
     // enabled flag change locally so the "path exists" indicator stays useful.
     useEffect(() => {
         let mounted = true;
-        api.getSoulseekSharing()
-            .then((s) => {
-                if (mounted) setStatus(s);
-            })
-            .catch(() => {
-                if (mounted) setStatus(null);
-            });
+        const load = () =>
+            api.getSoulseekSharing()
+                .then((s) => {
+                    if (mounted) setStatus(s);
+                })
+                .catch(() => {
+                    if (mounted) setStatus(null);
+                });
+        load();
+        // Poll so the connection/shared-count status reflects credential saves
+        // and share rescans without a page reload.
+        const timer = setInterval(load, 8000);
         return () => {
             mounted = false;
+            clearInterval(timer);
         };
     }, [settings.soulseekSharePath, settings.soulseekSharingEnabled]);
 
@@ -58,15 +66,40 @@ export function SoulseekSharingSection({ settings, onUpdate }: SoulseekSharingSe
             title="Soulseek Sharing"
             description="Serve files back to the Soulseek network (uploads)"
         >
-            {/* Capability banner: sharing is scaffolding until the serving layer
-                exists. Be explicit so enabling it doesn't imply uploads happen. */}
-            {status && !status.supported && (
+            {/* Live status from the slskd sidecar (the engine that serves files). */}
+            {status && !status.reachable && (
+                <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
+                    <p className="text-sm text-red-200">
+                        The slskd sharing engine isn&apos;t reachable. Make sure the
+                        <code className="mx-1 px-1 py-0.5 bg-black/30 rounded text-xs">slskd</code>
+                        container is running.
+                    </p>
+                </div>
+            )}
+            {status && status.reachable && !status.connected && (
                 <div className="mb-4 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
                     <p className="text-sm text-amber-200">
-                        Sharing isn&apos;t active yet. This build&apos;s Soulseek client can&apos;t
-                        serve files to peers, so these settings are saved but nothing is uploaded.
-                        The controls are here so the feature can be turned on once serving is implemented.
+                        slskd is running but not connected to Soulseek. Save your Soulseek
+                        username &amp; password under <strong>Track Downloads</strong> and hit
+                        Test &mdash; sharing goes live as soon as it connects.
+                    </p>
+                </div>
+            )}
+            {status && status.connected && (
+                <div className="mb-4 p-3 bg-green-500/10 border border-green-500/30 rounded-lg flex items-start gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-green-400 mt-0.5 flex-shrink-0" />
+                    <p className="text-sm text-green-200">
+                        Sharing is live &mdash;{" "}
+                        {status.sharedFileCount != null
+                            ? status.sharedFileCount.toLocaleString()
+                            : "?"}{" "}
+                        files shared
+                        {status.activeUploads != null && status.activeUploads > 0
+                            ? `, ${status.activeUploads} uploading now`
+                            : ""}
+                        .
                     </p>
                 </div>
             )}

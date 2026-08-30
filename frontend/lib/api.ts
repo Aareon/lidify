@@ -1750,10 +1750,12 @@ class ApiClient {
         );
     }
 
-    // Soulseek Sharing (admin) — config-only scaffolding until serving lands
+    // Soulseek Sharing (admin) — backed by the slskd sidecar
     async getSoulseekSharing() {
         return this.request<{
             supported: boolean;
+            reachable: boolean;
+            connected: boolean;
             enabled: boolean;
             sharePath: string | null;
             uploadSlots: number;

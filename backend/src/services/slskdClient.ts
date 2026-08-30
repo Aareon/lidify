@@ -133,16 +133,44 @@ export const slskdClient = {
 
     /** Connect to the Soulseek network (requires credentials to be configured). */
     connect(): Promise<void> {
-        return request<void>("/server/connect", { method: "PUT" }).then(
-            () => undefined
-        );
+        return request<void>("/server", { method: "PUT" }).then(() => undefined);
     },
 
-    /** Disconnect from the Soulseek network. */
+    /** Disconnect from the Soulseek network (best-effort). */
     disconnect(): Promise<void> {
-        return request<void>("/server/disconnect", { method: "PUT" }).then(
-            () => undefined
-        );
+        return request<void>("/server", { method: "DELETE" })
+            .then(() => undefined)
+            .catch(() => undefined);
+    },
+
+    /**
+     * Push Soulseek credentials into slskd's live config (remote configuration)
+     * so saving them in Lidify's web app connects immediately — no container
+     * restart. slskd's config precedence is env > yaml, so the compose file must
+     * NOT set SLSKD_SLSK_USERNAME/PASSWORD (env would shadow this yaml).
+     *
+     * Writes a minimal yaml containing only the soulseek credentials; everything
+     * else (shares, downloads, listen port) comes from env and is unaffected.
+     */
+    async setCredentials(username: string, password: string): Promise<void> {
+        // YAML double-quoted scalar: escape backslash and double-quote.
+        const q = (s: string) =>
+            '"' + String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
+        const yaml = `soulseek:\n  username: ${q(username)}\n  password: ${q(
+            password
+        )}\n`;
+        // Validate, then apply. Body is the JSON-encoded yaml string.
+        await request("/options/yaml/validate", {
+            method: "POST",
+            body: JSON.stringify(yaml),
+        });
+        await request("/options/yaml", {
+            method: "PUT",
+            body: JSON.stringify(yaml),
+        });
+        // slskd reloads config on change; nudge a connect in case it doesn't
+        // auto-reconnect. Best-effort — invalid creds simply won't connect.
+        await this.connect().catch(() => undefined);
     },
 
     // ── Shares (sharing status) ──────────────────────────────────────────────

@@ -244,6 +244,30 @@ router.post("/", async (req, res) => {
 
         invalidateSystemSettingsCache();
 
+        // Push Soulseek credentials to the slskd sidecar (the sharing/engine
+        // process) via its live remote-config API, so saving them in the web app
+        // connects immediately — no container restart. Best-effort: never fail the
+        // settings save if the sidecar is down or rejects them.
+        if (data.soulseekUsername && data.soulseekPassword) {
+            try {
+                const { slskdClient } = await import("../services/slskdClient");
+                if (await slskdClient.isReachable()) {
+                    await slskdClient.setCredentials(
+                        data.soulseekUsername,
+                        data.soulseekPassword
+                    );
+                    console.log(
+                        "[SLSKD] Pushed Soulseek credentials to sidecar (live)"
+                    );
+                }
+            } catch (slskdError: any) {
+                console.warn(
+                    "[SLSKD] Failed to push credentials to sidecar:",
+                    slskdError?.message || slskdError
+                );
+            }
+        }
+
         // If Audiobookshelf was disabled, clear all audiobook-related data
         if (data.audiobookshelfEnabled === false) {
             console.log(
@@ -618,7 +642,10 @@ router.post("/test-audiobookshelf", async (req, res) => {
     }
 });
 
-// Test Soulseek connection (direct via soulseek-ts)
+// Test Soulseek connection via the slskd sidecar (the engine). Pushes the
+// credentials into slskd's live config and polls its server state for login.
+// Note: this applies the credentials to slskd (there is no test-without-save on
+// the Soulseek network) — clicking Test configures the engine with these creds.
 router.post("/test-soulseek", async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -629,27 +656,50 @@ router.post("/test-soulseek", async (req, res) => {
             });
         }
 
-        console.log(`[SOULSEEK-TEST] Testing connection as "${username}"...`);
+        console.log(`[SOULSEEK-TEST] Testing via slskd as "${username}"...`);
+        const { slskdClient } = await import("../services/slskdClient");
 
-        try {
-            const { SlskClient } = await import("soulseek-ts");
-            const client = new SlskClient();
-            await client.login(username, password);
-            client.destroy();
+        if (!(await slskdClient.isReachable())) {
+            return res.status(503).json({
+                error: "slskd sidecar is not reachable",
+                details:
+                    "The slskd container isn't running or can't be reached at SLSKD_URL.",
+            });
+        }
 
-            res.json({
+        await slskdClient.setCredentials(username, password);
+
+        // Poll slskd's server state for a successful login (up to ~15s).
+        const deadline = Date.now() + 15000;
+        let state = await slskdClient.getServerState().catch(() => null);
+        while (Date.now() < deadline && !state?.isLoggedIn) {
+            await new Promise((r) => setTimeout(r, 1000));
+            state = await slskdClient.getServerState().catch(() => null);
+            // Settled in a non-connected, non-transitioning state → stop early.
+            if (
+                state &&
+                !state.isLoggedIn &&
+                !state.isConnecting &&
+                !state.isLoggingIn &&
+                !state.isTransitioning
+            ) {
+                break;
+            }
+        }
+
+        if (state?.isConnected && state?.isLoggedIn) {
+            return res.json({
                 success: true,
                 message: `Connected to Soulseek as "${username}"`,
                 soulseekUsername: username,
                 isConnected: true,
             });
-        } catch (connectError: any) {
-            console.error(`[SOULSEEK-TEST] Error: ${connectError.message}`);
-            res.status(401).json({
-                error: "Invalid Soulseek credentials or connection failed",
-                details: connectError.message,
-            });
         }
+
+        return res.status(401).json({
+            error: "Could not connect to Soulseek with these credentials",
+            details: state?.state || "not connected",
+        });
     } catch (error: any) {
         console.error("[SOULSEEK-TEST] Error:", error.message);
         res.status(500).json({

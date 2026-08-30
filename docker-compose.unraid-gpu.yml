@@ -115,14 +115,15 @@ services:
       - ${LIDIFY_DOWNLOADS:-/mnt/user/downloads/lidify}:/downloads
     environment:
       - TZ=${TZ:-America/Chicago}
-      - SLSKD_SLSK_USERNAME=${SLSKD_SLSK_USERNAME:-}
-      - SLSKD_SLSK_PASSWORD=${SLSKD_SLSK_PASSWORD:-}
+      # NOTE: Soulseek credentials are intentionally NOT set here. Lidify pushes
+      # them into slskd's live config via the API (remote configuration) when you
+      # save them in the web app, so they apply immediately. slskd's precedence is
+      # env > yaml, so setting SLSKD_SLSK_USERNAME/PASSWORD here would shadow that.
       - SLSKD_SLSK_LISTEN_PORT=50300
       - SLSKD_SHARED_DIR=/music
       - SLSKD_DOWNLOADS_DIR=/downloads
-      # Allow Lidify to update shares/credentials via the API later.
+      # Let Lidify update credentials/shares via the API.
       - SLSKD_REMOTE_CONFIGURATION=true
       # No web auth: the API is only reachable inside this compose network.
-      # Phase 2 adds an API key when Lidify starts calling it.
       - SLSKD_NO_AUTH=true
     restart: unless-stopped
