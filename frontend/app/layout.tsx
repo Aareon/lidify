@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { Montserrat } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 import { AuthProvider } from "@/lib/auth-context";
 import { ToastProvider } from "@/lib/toast-context";
@@ -13,9 +13,12 @@ import { Toaster } from "sonner";
 // Brand color for JS contexts (matches Tailwind brand color)
 const BRAND_COLOR = "#fca200";
 
-const montserrat = Montserrat({
-    weight: ["300", "400", "500", "600", "700", "800"],
-    subsets: ["latin"],
+// Self-hosted to remove the build-time Google Fonts fetch, which was flaky on
+// the Unraid host and (once it failed) poisoned the Turbopack cache. This is the
+// Montserrat v31 latin variable font (weights 300–800) from Google Fonts.
+const montserrat = localFont({
+    src: "./fonts/montserrat-latin.woff2",
+    weight: "300 800",
     display: "swap",
     variable: "--font-montserrat",
 });
