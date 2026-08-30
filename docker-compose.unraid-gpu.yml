@@ -24,9 +24,11 @@ services:
     volumes:
       - ${LIDIFY_APPDATA:-/mnt/user/appdata/lidify}:/data
       - ${LIDIFY_DOWNLOADS:-/mnt/user/downloads/lidify}:/downloads
+      # slskd's app/config/db dir — must be writable by uid 1000 (slskd runs as 1000:1000).
+      - ${SLSKD_APPDATA:-/mnt/user/appdata/slskd}:/slskd-data
     # Also create+chmod the downloads dir so the app (uid 1000) can write track
     # downloads there. Without this, mkdir under /downloads fails with EACCES.
-    command: ["sh", "-c", "mkdir -p /data/redis /data/postgres /downloads && chmod -R 777 /data && chmod 777 /downloads"]
+    command: ["sh", "-c", "mkdir -p /data/redis /data/postgres /downloads /slskd-data && chmod -R 777 /data && chmod 777 /downloads /slskd-data"]
     restart: "no"
 
   lidify:
@@ -69,4 +71,58 @@ services:
       - LIDIFY_CALLBACK_URL=${LIDIFY_CALLBACK_URL:-http://10.0.0.200:3030}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # slskd — the Soulseek engine for SHARING (and, after the cutover, downloads).
+  # soulseek-ts (inside Lidify) is download-only and can't serve files or be
+  # searchable; slskd handles search visibility, browse, and uploads. It logs in
+  # with the SAME Soulseek account, so once this is running, Lidify's own
+  # soulseek-ts must stop logging in (the network allows one client per account)
+  # — that cutover follows in a later change. See KNOWN_ISSUES.md / project memory.
+  #
+  # Lidify reaches slskd's REST API over the internal compose network at
+  # http://slskd:5030 — the API/UI is intentionally NOT published to the LAN
+  # (SLSKD_NO_AUTH is safe only because it's unreachable from outside this network).
+  #
+  # First boot needs credentials from the host .env next to this file:
+  #   SLSKD_SLSK_USERNAME=your_soulseek_user
+  #   SLSKD_SLSK_PASSWORD=your_soulseek_pass
+  # (After the cutover, Lidify pushes credential changes to slskd via its API so
+  # saving them in the web app applies immediately without a redeploy.)
+  slskd:
+    image: slskd/slskd:latest
+    container_name: lidify-slskd
+    # Run as uid:gid 1000 so it can read /music and write /downloads + /app,
+    # matching how the Lidify container already accesses those mounts.
+    user: "1000:1000"
+    depends_on:
+      init-permissions:
+        condition: service_completed_successfully
+    ports:
+      # Soulseek listen port. For full search visibility on the network, forward
+      # this port to the Unraid host on your router. Nothing else must be public.
+      - "${SLSKD_LISTEN_PORT:-50300}:50300"
+      # Web UI / REST API is deliberately NOT published — Lidify talks to it over
+      # the internal compose network. Uncomment (and set web auth) to expose the UI:
+      # - "${SLSKD_PORT:-5030}:5030"
+    volumes:
+      # Config + database + logs (persistent).
+      - ${SLSKD_APPDATA:-/mnt/user/appdata/slskd}:/app
+      # The library to share — read-only; sharing only ever reads.
+      - ${MUSIC_PATH:-/mnt/user/media/music}:/music:ro
+      # Same downloads mount Lidify scans, so slskd-fetched tracks land where
+      # Lidify already looks (used once downloads are cut over to slskd).
+      - ${LIDIFY_DOWNLOADS:-/mnt/user/downloads/lidify}:/downloads
+    environment:
+      - TZ=${TZ:-America/Chicago}
+      - SLSKD_SLSK_USERNAME=${SLSKD_SLSK_USERNAME:-}
+      - SLSKD_SLSK_PASSWORD=${SLSKD_SLSK_PASSWORD:-}
+      - SLSKD_SLSK_LISTEN_PORT=50300
+      - SLSKD_SHARED_DIR=/music
+      - SLSKD_DOWNLOADS_DIR=/downloads
+      # Allow Lidify to update shares/credentials via the API later.
+      - SLSKD_REMOTE_CONFIGURATION=true
+      # No web auth: the API is only reachable inside this compose network.
+      # Phase 2 adds an API key when Lidify starts calling it.
+      - SLSKD_NO_AUTH=true
     restart: unless-stopped
