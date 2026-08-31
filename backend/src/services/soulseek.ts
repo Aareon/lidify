@@ -520,8 +520,19 @@ class SoulseekService {
      */
     private async ensureSlskdConfigured(): Promise<void> {
         if (this.configSynced) return;
-        this.configSynced = true; // set first to avoid concurrent double-apply
         try {
+            // If slskd is already connected + logged in, it persisted its config
+            // (creds + upload limits + _incoming) from a prior save and
+            // reconnected on its own after a restart. Re-applying would force a
+            // reconnect that disrupts an in-flight search (the first search after
+            // a deploy would return 0 results). So only sync when NOT connected.
+            const state = await slskdClient.getServerState().catch(() => null);
+            if (state?.isConnected && state?.isLoggedIn) {
+                this.configSynced = true;
+                return;
+            }
+
+            this.configSynced = true; // set before applying to avoid double-apply
             const settings = await getSystemSettings();
             if (settings?.soulseekUsername && settings?.soulseekPassword) {
                 await slskdClient.applyConfig({

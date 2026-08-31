@@ -3814,10 +3814,10 @@ async function precacheYouTubeTrack(videoId: string): Promise<void> {
             "--audio-quality", "0",
             "-o", `"${tempPath}"`,
             "--no-warnings",
-            "--extractor-args", "youtube:player_client=android_vr",
+            // No player_client pin: android_vr is broken (HTTP 403 / no formats).
             `"${url}"`,
         ].join(" ");
-        
+
         const { promisify } = require("util");
         const { exec } = require("child_process");
         const execPromise = promisify(exec);
@@ -3977,7 +3977,7 @@ router.get("/youtube/stream/:videoId", async (req, res) => {
                             "--audio-quality", "0",
                             "-o", `"${tempPath}"`,
                             "--no-warnings",
-                            "--extractor-args", "youtube:player_client=android_vr", // Bypass SABR/PO token
+                            // No player_client pin: android_vr is broken (HTTP 403).
                             `"${url}"`,
                         ].join(" ");
                         
