@@ -1,6 +1,6 @@
 import React, { memo, useCallback, useMemo } from 'react';
 import { Card } from '@/components/ui/Card';
-import { Play, Pause, Volume2, ListPlus, Plus, Disc } from 'lucide-react';
+import { Play, Pause, Volume2, ListPlus, Plus, Disc, Download, Check } from 'lucide-react';
 import { cn } from '@/utils/cn';
 import type { Track, Album, AlbumSource } from '../types';
 import type { ColorPalette } from '@/hooks/useImageColor';
@@ -19,6 +19,10 @@ interface TrackListProps {
   previewTrack: string | null;
   previewPlaying: boolean;
   onPreview: (track: Track, e: React.MouseEvent) => void;
+  /** Download an unowned track (from the enriched MB tracklist) via the smart pipeline. */
+  onDownload?: (track: Track) => void;
+  /** Track IDs whose download has been requested (shows a check). */
+  downloadRequested?: Set<string>;
 }
 
 interface TrackRowProps {
@@ -36,6 +40,8 @@ interface TrackRowProps {
   onAddToQueue: (track: Track) => void;
   onAddToPlaylist: (trackId: string) => void;
   onPreview: (track: Track, e: React.MouseEvent) => void;
+  onDownload?: (track: Track) => void;
+  isDownloadRequested?: boolean;
 }
 
 const formatDuration = (seconds: number) => {
@@ -130,6 +136,8 @@ const TrackRow = memo(function TrackRow({
   onAddToQueue,
   onAddToPlaylist,
   onPreview,
+  onDownload,
+  isDownloadRequested,
 }: TrackRowProps) {
   const isPreviewOnly = !isOwned;
 
@@ -297,6 +305,26 @@ const TrackRow = memo(function TrackRow({
         </button>
       )}
 
+      {isPreviewOnly && onDownload && (
+        isDownloadRequested ? (
+          <span className="p-2 text-brand" title="Download started">
+            <Check className="w-4 h-4" />
+          </span>
+        ) : (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDownload(track);
+            }}
+            className="p-2 rounded-full bg-[#1a1a1a] hover:bg-[#2a2a2a] transition-colors text-gray-300 hover:text-white"
+            aria-label="Download to library"
+            title="Download to your library"
+          >
+            <Download className="w-4 h-4" />
+          </button>
+        )
+      )}
+
       {track.duration && (
         <div className="text-xs md:text-sm text-gray-400 w-10 md:w-12 text-right tabular-nums">
           {formatDuration(track.duration)}
@@ -312,7 +340,8 @@ const TrackRow = memo(function TrackRow({
     prevProps.isPreviewPlaying === nextProps.isPreviewPlaying &&
     prevProps.index === nextProps.index &&
     prevProps.displayNumber === nextProps.displayNumber &&
-    prevProps.isOwned === nextProps.isOwned
+    prevProps.isOwned === nextProps.isOwned &&
+    prevProps.isDownloadRequested === nextProps.isDownloadRequested
   );
 });
 
@@ -330,8 +359,10 @@ export const TrackList = memo(function TrackList({
   previewTrack,
   previewPlaying,
   onPreview,
+  onDownload,
+  downloadRequested,
 }: TrackListProps) {
-  const isOwned = source === 'library';
+  const albumOwned = source === 'library';
 
   // Group tracks by disc number
   const { discGroups, hasMultipleDiscs } = useMemo(() => {
@@ -386,6 +417,9 @@ export const TrackList = memo(function TrackList({
                   const isCurrentTrack = currentTrackId === track.id;
                   const isActuallyPlaying = isCurrentTrack && isPlaying;
                   const isPreviewPlayingTrack = previewTrack === track.id && previewPlaying;
+                  // Per-track ownership (enriched albums mix owned + unowned);
+                  // fall back to the album-level flag when not provided.
+                  const rowIsOwned = track.owned ?? albumOwned;
 
                   return (
                     <TrackRow
@@ -394,7 +428,7 @@ export const TrackList = memo(function TrackList({
                       index={overallIndex}
                       displayNumber={track.trackNo ?? (overallIndex + 1)}
                       album={album}
-                      isOwned={isOwned}
+                      isOwned={rowIsOwned}
                       isCurrentTrack={isCurrentTrack}
                       isActuallyPlaying={isActuallyPlaying}
                       isPreviewPlaying={isPreviewPlayingTrack}
@@ -404,6 +438,8 @@ export const TrackList = memo(function TrackList({
                       onAddToQueue={onAddToQueue}
                       onAddToPlaylist={onAddToPlaylist}
                       onPreview={onPreview}
+                      onDownload={onDownload}
+                      isDownloadRequested={downloadRequested?.has(track.id)}
                     />
                   );
                 })}

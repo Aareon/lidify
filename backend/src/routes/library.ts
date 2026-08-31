@@ -2599,10 +2599,85 @@ router.get("/albums/:id", async (req, res) => {
             }
         }
 
+        // Enrich: a lazy cover URL when none is stored, and the FULL MusicBrainz
+        // tracklist merged with owned tracks so songs that aren't downloaded yet
+        // still show (as preview/download rows).
+        const rgMbid = album.rgMbid;
+        const hasValidRg = !!rgMbid && !rgMbid.startsWith("temp-");
+
+        let coverArt = album.coverUrl;
+        if (!coverArt && hasValidRg) {
+            const params = new URLSearchParams({
+                artist: album.artist?.name || "",
+                album: album.title,
+            });
+            coverArt = `/api/library/album-cover/${rgMbid}?${params}`;
+        }
+
+        let tracks: any[] = album.tracks.map((t) => ({ ...t, owned: true }));
+        if (hasValidRg) {
+            try {
+                const mbTracks = await musicBrainzService.getAlbumTracklist(
+                    rgMbid as string
+                );
+                if (mbTracks.length > 0) {
+                    const norm = (s: string) =>
+                        (s || "")
+                            .toLowerCase()
+                            .replace(/\(.*?\)|\[.*?\]/g, " ")
+                            .replace(/[^a-z0-9]+/g, "")
+                            .trim();
+                    const ownedByTitle = new Map<string, any>();
+                    const ownedByPos = new Map<string, any>();
+                    for (const t of album.tracks) {
+                        ownedByTitle.set(norm(t.title), t);
+                        if (t.trackNo != null) {
+                            ownedByPos.set(`${t.discNo || 1}|${t.trackNo}`, t);
+                        }
+                    }
+                    const used = new Set<string>();
+                    const merged = mbTracks.map((mb) => {
+                        const match =
+                            ownedByTitle.get(norm(mb.title)) ||
+                            ownedByPos.get(`${mb.discNo}|${mb.position}`);
+                        if (match) {
+                            used.add(match.id);
+                            return {
+                                ...match,
+                                trackNo: match.trackNo ?? mb.position,
+                                discNo: match.discNo ?? mb.discNo,
+                                owned: true,
+                            };
+                        }
+                        return {
+                            id: `mb-${rgMbid}-${mb.discNo}-${mb.position}`,
+                            title: mb.title,
+                            trackNo: mb.position,
+                            discNo: mb.discNo,
+                            duration: mb.lengthMs
+                                ? Math.round(mb.lengthMs / 1000)
+                                : 0,
+                            albumId: album.id,
+                            filePath: null,
+                            owned: false,
+                        };
+                    });
+                    // Keep any owned tracks MB didn't list (bonus/edge cases).
+                    for (const t of album.tracks) {
+                        if (!used.has(t.id)) merged.push({ ...t, owned: true });
+                    }
+                    tracks = merged;
+                }
+            } catch (err) {
+                // Non-fatal: fall back to owned tracks only.
+            }
+        }
+
         res.json({
             ...album,
+            tracks,
             owned: hasTracksOnDisk,
-            coverArt: album.coverUrl,
+            coverArt,
             bio,
         });
     } catch (error) {

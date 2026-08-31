@@ -32,6 +32,8 @@ export interface Track {
   trackNo?: number;
   discNo?: number;
   playCount?: number;
+  // Per-track ownership (partially-owned albums enriched with the MB tracklist).
+  owned?: boolean;
   // Audio file info (for owned tracks)
   mime?: string;
   fileSize?: number;

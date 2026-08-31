@@ -257,6 +257,60 @@ class MusicBrainzService {
     }
 
     /**
+     * Full tracklist for a release group: picks a representative release and
+     * returns its tracks (ordered), used to enrich a partially-owned album's
+     * page with the songs that aren't downloaded yet.
+     */
+    async getAlbumTracklist(
+        rgMbid: string
+    ): Promise<
+        Array<{
+            position: number;
+            title: string;
+            lengthMs: number | null;
+            discNo: number;
+        }>
+    > {
+        try {
+            const rg: any = await this.getReleaseGroup(rgMbid);
+            const releases: any[] = rg?.releases || [];
+            if (releases.length === 0) return [];
+            // Prefer an official release; otherwise the first available.
+            const chosen =
+                releases.find((r: any) => r.status === "Official") ||
+                releases[0];
+            const release: any = await this.getRelease(chosen.id);
+            const media: any[] = release?.media || [];
+            const out: Array<{
+                position: number;
+                title: string;
+                lengthMs: number | null;
+                discNo: number;
+            }> = [];
+            media.forEach((m: any, discIdx: number) => {
+                const discNo = m.position || discIdx + 1;
+                for (const t of m.tracks || []) {
+                    out.push({
+                        position: t.position || out.length + 1,
+                        title: t.title || t.recording?.title || "",
+                        lengthMs:
+                            typeof t.length === "number"
+                                ? t.length
+                                : t.recording?.length ?? null,
+                        discNo,
+                    });
+                }
+            });
+            return out;
+        } catch (e: any) {
+            console.warn(
+                `[MusicBrainz] getAlbumTracklist(${rgMbid}) failed: ${e?.message || e}`
+            );
+            return [];
+        }
+    }
+
+    /**
      * Convert a Release MBID to a Release Group MBID
      * Lidarr sends Release MBIDs (specific version), but we need Release Group MBIDs
      * Returns null if lookup fails

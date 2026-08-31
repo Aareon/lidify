@@ -6,6 +6,7 @@ import { useAudio } from "@/lib/audio-context";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { useImageColor } from "@/hooks/useImageColor";
 import { api } from "@/lib/api";
+import { toast } from "sonner";
 import { PlaylistSelector } from "@/components/ui/PlaylistSelector";
 import { useDownloadContext } from "@/lib/download-context";
 
@@ -37,6 +38,10 @@ export default function AlbumPage({ params }: AlbumPageProps) {
     const [pendingTrackIds, setPendingTrackIds] = useState<string[]>([]);
     const [, setIsBulkAdd] = useState(false);
     const [, setIsAddingToPlaylist] = useState(false);
+    // Download-request state for unowned tracks (enriched MB tracklist rows).
+    const [downloadRequested, setDownloadRequested] = useState<Set<string>>(
+        new Set()
+    );
 
     // Custom hooks
     const { album, source, loading, reloadAlbum } = useAlbumData(id);
@@ -84,6 +89,30 @@ export default function AlbumPage({ params }: AlbumPageProps) {
     // Event handlers
     const handlePlayTrack = (track: Track, index: number) => {
         playAlbum(album, index);
+    };
+
+    // Kick a not-yet-owned track (from the enriched MB tracklist) through the
+    // smart download pipeline (Soulseek → Lidarr → YouTube).
+    const handleDownloadTrack = async (track: Track) => {
+        if (!album || downloadRequested.has(track.id)) return;
+        setDownloadRequested((prev) => new Set(prev).add(track.id));
+        try {
+            await api.downloadTrack(
+                track.artist?.name || album.artist?.name || "",
+                track.title,
+                album.title,
+                track.duration ? Math.round(track.duration * 1000) : undefined
+            );
+            toast.success(`Downloading “${track.title}”`);
+        } catch (error) {
+            console.error("Failed to start track download:", error);
+            toast.error("Failed to start download");
+            setDownloadRequested((prev) => {
+                const next = new Set(prev);
+                next.delete(track.id);
+                return next;
+            });
+        }
     };
 
     const openPlaylistSelector = (trackIds: string[], bulk = false) => {
@@ -195,6 +224,8 @@ export default function AlbumPage({ params }: AlbumPageProps) {
                                     e
                                 )
                             }
+                            onDownload={handleDownloadTrack}
+                            downloadRequested={downloadRequested}
                         />
                     )}
 
