@@ -850,13 +850,47 @@ router.post("/track", async (req, res) => {
             .json({ error: "artist and title are required" });
     }
 
+    // Create a tracking job so the download shows in the activity panel and,
+    // when it flips out of "processing", the artist page refetches (useArtistData
+    // watches active downloads). Without this the new track stays behind a stale
+    // React Query cache.
+    const job = await prisma.downloadJob.create({
+        data: {
+            userId,
+            subject: `${artist} - ${title}`,
+            type: "track",
+            status: "processing",
+            metadata: {
+                downloadType: "single_track",
+                artistName: artist,
+                albumTitle: album || null,
+            },
+        },
+    });
+
     // Respond right away — the download happens in the background.
-    res.json({ success: true, message: "Download started" });
+    res.json({ success: true, message: "Download started", downloadJobId: job.id });
 
     (async () => {
         const { notificationService } = await import(
             "../services/notificationService"
         );
+        const finishJob = async (status: "completed" | "failed", extra?: any) => {
+            await prisma.downloadJob
+                .update({
+                    where: { id: job.id },
+                    data: {
+                        status,
+                        completedAt: new Date(),
+                        ...(extra?.error ? { error: extra.error } : {}),
+                        metadata: {
+                            ...(job.metadata as any),
+                            ...(extra?.metadata || {}),
+                        },
+                    },
+                })
+                .catch(() => undefined);
+        };
         try {
             const { acquireTrackSmart } = await import(
                 "../services/trackAcquisition"
@@ -878,6 +912,8 @@ router.post("/track", async (req, res) => {
                 (result.source === "soulseek" || result.source === "youtube")
             ) {
                 // Scan the Singles folder so the new file enters the library.
+                // playlistOnlyMode:false marks the album as LIBRARY (not DISCOVER)
+                // so it shows in the artist's Discography.
                 const { getSystemSettings } = await import(
                     "../utils/systemSettings"
                 );
@@ -890,6 +926,10 @@ router.post("/track", async (req, res) => {
                     musicPath: path.join(downloadBase, "Singles"),
                     basePath: downloadBase,
                     source: "single-track-download",
+                    playlistOnlyMode: false,
+                });
+                await finishJob("completed", {
+                    metadata: { source: result.source, filePath: result.filePath },
                 });
                 await notificationService.notifySystem(
                     userId,
@@ -897,12 +937,18 @@ router.post("/track", async (req, res) => {
                     `"${title}" by ${artist} downloaded (${result.source}).`
                 );
             } else if (result.success && result.source === "lidarr") {
+                await finishJob("completed", {
+                    metadata: { source: "lidarr-album-upgrade" },
+                });
                 await notificationService.notifySystem(
                     userId,
                     "Fetching Album",
                     `Getting "${title}" by ${artist} via Lidarr — it'll appear once the album imports.`
                 );
             } else {
+                await finishJob("failed", {
+                    error: result.error || "no source found",
+                });
                 await notificationService.notifySystem(
                     userId,
                     "Download Failed",
@@ -913,6 +959,7 @@ router.post("/track", async (req, res) => {
             }
         } catch (error: any) {
             console.error("[Track Download] error:", error?.message || error);
+            await finishJob("failed", { error: error?.message || "error" });
             try {
                 await notificationService.notifySystem(
                     userId,
