@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
     Bell,
     Check,
@@ -28,6 +28,15 @@ interface Notification {
 export function NotificationsTab() {
     const queryClient = useQueryClient();
     const previousNotificationIds = useRef<Set<string>>(new Set());
+    // Notifications whose (possibly long) message the user expanded in full.
+    const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+    const toggleExpanded = (id: string) =>
+        setExpandedIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
 
     const {
         data: notifications = [],
@@ -275,11 +284,46 @@ export function NotificationsTab() {
                                             <span className="w-1.5 h-1.5 rounded-full bg-brand flex-shrink-0" />
                                         )}
                                     </div>
-                                    {notification.message && (
-                                        <p className="text-xs text-white/50 mt-0.5 line-clamp-2">
-                                            {notification.message}
-                                        </p>
-                                    )}
+                                    {notification.message &&
+                                        (() => {
+                                            const isExpanded =
+                                                expandedIds.has(
+                                                    notification.id
+                                                );
+                                            // Heuristic: a short message always
+                                            // fits in 2 lines, so only offer the
+                                            // toggle when it might be clamped.
+                                            const isLong =
+                                                notification.message.length > 80;
+                                            return (
+                                                <div className="mt-0.5">
+                                                    <p
+                                                        className={cn(
+                                                            "text-xs text-white/50",
+                                                            isExpanded
+                                                                ? "whitespace-pre-wrap break-words"
+                                                                : "line-clamp-2"
+                                                        )}
+                                                    >
+                                                        {notification.message}
+                                                    </p>
+                                                    {isLong && (
+                                                        <button
+                                                            onClick={() =>
+                                                                toggleExpanded(
+                                                                    notification.id
+                                                                )
+                                                            }
+                                                            className="text-[10px] text-brand hover:underline mt-0.5"
+                                                        >
+                                                            {isExpanded
+                                                                ? "Show less"
+                                                                : "Show more"}
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            );
+                                        })()}
                                     <div className="flex items-center gap-2 mt-1.5">
                                         <span className="text-[10px] text-white/30">
                                             {formatTime(notification.createdAt)}

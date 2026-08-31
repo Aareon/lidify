@@ -949,22 +949,20 @@ router.post("/track", async (req, res) => {
                 await finishJob("failed", {
                     error: result.error || "no source found",
                 });
-                await notificationService.notifySystem(
+                await notificationService.notifyDownloadFailed(
                     userId,
-                    "Download Failed",
-                    `Couldn't get "${title}" by ${artist}: ${
-                        result.error || "no source found"
-                    }`
+                    `"${title}" by ${artist}`,
+                    result.error || "no source found"
                 );
             }
         } catch (error: any) {
             console.error("[Track Download] error:", error?.message || error);
             await finishJob("failed", { error: error?.message || "error" });
             try {
-                await notificationService.notifySystem(
+                await notificationService.notifyDownloadFailed(
                     userId,
-                    "Download Failed",
-                    `Error downloading "${title}" by ${artist}.`
+                    `"${title}" by ${artist}`,
+                    error?.message || "error"
                 );
             } catch {
                 /* ignore */
