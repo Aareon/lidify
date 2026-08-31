@@ -39,7 +39,16 @@ export function AlbumActionBar({
     const [showReleaseModal, setShowReleaseModal] = useState(false);
 
     const isOwned = album.owned !== undefined ? album.owned : source === "library";
-    const showDownload = !isOwned && (album.mbid || album.rgMbid);
+    // Partially-owned albums (e.g. seeded by downloading a single track from
+    // YouTube, then enriched with the full MusicBrainz/Deezer tracklist) own
+    // some tracks but not all. Show the owned controls (Play/Shuffle) when we
+    // hold at least one track, AND the Download/Search pair whenever any track
+    // is still missing so the rest of the album can be grabbed.
+    const tracks = album.tracks ?? [];
+    const hasOwnedTracks = isOwned || tracks.some((t) => t.owned);
+    const hasMissingTracks = !isOwned || tracks.some((t) => t.owned === false);
+    const showPlay = hasOwnedTracks;
+    const showDownload = hasMissingTracks && !!(album.mbid || album.rgMbid);
     const showPause = isPlaying && isPlayingThisAlbum;
 
     const handlePlayPauseClick = () => {
@@ -55,8 +64,8 @@ export function AlbumActionBar({
     return (
         <>
             <div className="flex items-center gap-4">
-                {/* Play Button - only for owned albums */}
-                {isOwned && (
+                {/* Play Button - shown when we own at least one track */}
+                {showPlay && (
                     <>
                         <button
                             onClick={handlePlayPauseClick}
