@@ -71,7 +71,7 @@ services:
       - LIDIFY_CALLBACK_URL=${LIDIFY_CALLBACK_URL:-http://10.0.0.200:3030}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    restart: unless-stopped
+    restart: always
 
   # slskd — the Soulseek engine for SHARING (and, after the cutover, downloads).
   # soulseek-ts (inside Lidify) is download-only and can't serve files or be
@@ -126,4 +126,4 @@ services:
       - SLSKD_REMOTE_CONFIGURATION=true
       # No web auth: the API is only reachable inside this compose network.
       - SLSKD_NO_AUTH=true
-    restart: unless-stopped
+    restart: always
