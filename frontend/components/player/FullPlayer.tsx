@@ -645,7 +645,7 @@ export function FullPlayer() {
                 </div>
 
                 {/* Volume & Expand */}
-                <div className="flex items-center gap-3 w-52 justify-end">
+                <div className="flex items-center gap-3 w-80 justify-end">
                     <button
                         onClick={toggleMute}
                         className="text-gray-400 hover:text-white transition-all duration-200 hover:scale-110"
@@ -657,7 +657,7 @@ export function FullPlayer() {
                         )}
                     </button>
 
-                    <div className="relative flex-1">
+                    <div className="relative flex-1 min-w-[96px]">
                         <input
                             type="range"
                             min="0"
