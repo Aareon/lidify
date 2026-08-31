@@ -26,7 +26,7 @@ import { enrichSimilarArtist, prefetchDiscographyCovers } from "../workers/artis
 import { extractColorsFromImage } from "../utils/colorExtractor";
 import { dataCacheService } from "../services/dataCache";
 import { fetchExternalImage, normalizeExternalImageUrl } from "../services/imageProxy";
-import { youtubeMusicService } from "../services/youtube-music";
+import { youtubeMusicService, ytdlpCookieArgs } from "../services/youtube-music";
 import axios from "axios";
 // MusicBrainz secondary types to exclude from discography
 const EXCLUDED_SECONDARY_TYPES = [
@@ -3914,6 +3914,7 @@ async function precacheYouTubeTrack(videoId: string): Promise<void> {
         const url = `https://music.youtube.com/watch?v=${videoId}`;
         const command = [
             "yt-dlp",
+            ytdlpCookieArgs(), // --cookies <file> when configured (bot-check bypass)
             "-x",
             "--audio-format", "opus",
             "--audio-quality", "0",
@@ -4077,6 +4078,7 @@ router.get("/youtube/stream/:videoId", async (req, res) => {
                         const url = `https://music.youtube.com/watch?v=${videoId}`;
                         const command = [
                             "yt-dlp",
+                            ytdlpCookieArgs(), // --cookies <file> when configured (bot-check bypass)
                             "-x",
                             "--audio-format", "opus",
                             "--audio-quality", "0",

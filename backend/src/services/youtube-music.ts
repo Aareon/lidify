@@ -97,6 +97,38 @@ const DOWNLOAD_FORMAT = process.env.YOUTUBE_MUSIC_DOWNLOAD_FORMAT || "opus";
 const DOWNLOAD_USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
 
+// YouTube increasingly answers datacenter/VPS IPs with "Sign in to confirm
+// you're not a bot", which no player_client rotation can bypass. The durable
+// fix is a Netscape-format cookies.txt exported from a logged-in YouTube
+// session. Drop it in the appdata dir (mounted at /data) as
+// youtube-cookies.txt, or point YTDLP_COOKIES_FILE elsewhere; when the file
+// exists we pass `--cookies <path>` to every yt-dlp invocation.
+const YTDLP_COOKIES_FILE =
+    process.env.YTDLP_COOKIES_FILE || "/data/youtube-cookies.txt";
+let loggedCookieState = false;
+export function ytdlpCookieArgs(): string {
+    try {
+        if (fs.existsSync(YTDLP_COOKIES_FILE)) {
+            if (!loggedCookieState) {
+                console.log(
+                    `[YouTube Music] Using cookies file for yt-dlp: ${YTDLP_COOKIES_FILE}`
+                );
+                loggedCookieState = true;
+            }
+            return `--cookies "${YTDLP_COOKIES_FILE}"`;
+        }
+    } catch {
+        // fall through to no-cookies
+    }
+    if (!loggedCookieState) {
+        console.log(
+            `[YouTube Music] No yt-dlp cookies file at ${YTDLP_COOKIES_FILE} — YouTube may block downloads with a bot check. See docs to add one.`
+        );
+        loggedCookieState = true;
+    }
+    return "";
+}
+
 // Cache TTLs
 const STREAM_URL_TTL = 4 * 60 * 60; // 4 hours (conservative vs 5-6h expiry)
 const MATCH_CACHE_TTL = 24 * 60 * 60; // 24 hours
@@ -1538,9 +1570,11 @@ class YouTubeMusicService {
         const url = `https://music.youtube.com/watch?v=${videoId}`;
 
         try {
+            const cookieArgs = ytdlpCookieArgs();
+
             // Get best audio stream URL
             const { stdout } = await execPromise(
-                `yt-dlp -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" -g --no-warnings "${url}"`,
+                `yt-dlp ${cookieArgs} -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" -g --no-warnings "${url}"`,
                 { timeout: 30000 }
             );
 
@@ -1551,7 +1585,7 @@ class YouTubeMusicService {
 
             // Get format info
             const { stdout: formatInfo } = await execPromise(
-                `yt-dlp -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" --print "%(ext)s" --no-warnings "${url}"`,
+                `yt-dlp ${cookieArgs} -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" --print "%(ext)s" --no-warnings "${url}"`,
                 { timeout: 10000 }
             ).catch(() => ({ stdout: "webm" }));
 
@@ -1655,6 +1689,7 @@ class YouTubeMusicService {
             // that cause music-metadata parsing to fail. We fetch covers from Deezer instead.
             const command = [
                 "yt-dlp",
+                ytdlpCookieArgs(), // --cookies <file> when configured (bot-check bypass)
                 "-x", // Extract audio
                 "--audio-format", format,
                 "--audio-quality", "0", // 0 = best available (no upsampling)
