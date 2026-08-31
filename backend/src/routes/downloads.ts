@@ -875,21 +875,30 @@ router.post("/track", async (req, res) => {
         const { notificationService } = await import(
             "../services/notificationService"
         );
+        const { withTransaction } = await import("../utils/withTransaction");
         const finishJob = async (status: "completed" | "failed", extra?: any) => {
-            await prisma.downloadJob
-                .update({
+            // Read-modify-write inside a retrying transaction so a concurrent
+            // metadata update (webhook/scan) can't clobber this finish, and a
+            // transient write-conflict/deadlock is retried instead of lost.
+            await withTransaction(async (tx) => {
+                const current = await tx.downloadJob.findUnique({
+                    where: { id: job.id },
+                    select: { metadata: true },
+                });
+                await tx.downloadJob.update({
                     where: { id: job.id },
                     data: {
                         status,
                         completedAt: new Date(),
                         ...(extra?.error ? { error: extra.error } : {}),
                         metadata: {
-                            ...(job.metadata as any),
+                            ...((current?.metadata as any) ||
+                                (job.metadata as any)),
                             ...(extra?.metadata || {}),
                         },
                     },
-                })
-                .catch(() => undefined);
+                });
+            }, { label: "track-finishJob" }).catch(() => undefined);
         };
         try {
             const { acquireTrackSmart } = await import(

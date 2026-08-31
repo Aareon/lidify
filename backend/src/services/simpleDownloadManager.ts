@@ -7,6 +7,7 @@
  */
 
 import { prisma } from "../utils/db";
+import { withTransaction } from "../utils/withTransaction";
 import { lidarrService, LidarrRelease } from "./lidarr";
 import { musicBrainzService, MusicBrainzError } from "./musicbrainz";
 import { getSystemSettings } from "../utils/systemSettings";
@@ -465,22 +466,41 @@ class SimpleDownloadManager {
             }
         }
 
-        // Update job with Lidarr reference and ensure status is processing
-        await prisma.downloadJob.update({
-            where: { id: job.id },
-            data: {
-                status: "processing", // Ensure status is processing (might have been pending)
-                lidarrRef: downloadId,
-                lidarrAlbumId,
-                targetMbid: job.targetMbid || albumMbid, // Keep original or use Lidarr's
-                metadata: {
-                    ...((job.metadata as any) || {}),
-                    downloadId,
-                    lidarrMbid: albumMbid, // Store Lidarr's MBID for future matching
-                    grabbedAt: new Date().toISOString(),
+        // Update job with Lidarr reference and ensure status is processing.
+        // Concurrent grab webhooks race here; read-modify-write the metadata in a
+        // retrying transaction and only claim the job if it isn't already linked
+        // to a DIFFERENT download, so two events can't clobber each other.
+        const linkedJobId = job.id;
+        await withTransaction(async (tx) => {
+            const current = await tx.downloadJob.findUnique({
+                where: { id: linkedJobId },
+                select: { metadata: true, lidarrRef: true, targetMbid: true },
+            });
+            if (
+                current?.lidarrRef &&
+                current.lidarrRef !== downloadId
+            ) {
+                // Another grab already claimed this job; don't steal it.
+                return;
+            }
+            await tx.downloadJob.update({
+                where: { id: linkedJobId },
+                data: {
+                    status: "processing",
+                    lidarrRef: downloadId,
+                    lidarrAlbumId,
+                    targetMbid: current?.targetMbid || albumMbid,
+                    metadata: {
+                        ...((current?.metadata as any) ||
+                            (job.metadata as any) ||
+                            {}),
+                        downloadId,
+                        lidarrMbid: albumMbid,
+                        grabbedAt: new Date().toISOString(),
+                    },
                 },
-            },
-        });
+            });
+        }, { label: "onDownloadGrabbed-link" });
 
         console.log(`   Linked to job: ${job.id}`);
         return { matched: true, jobId: job.id };
@@ -1070,14 +1090,18 @@ class SimpleDownloadManager {
             }
         }
 
-        await prisma.downloadJob.update({
-            where: { id: job.id },
-            data: {
-                status: "failed",
-                error: `All releases and albums exhausted: ${reason}`,
-                completedAt: new Date(),
-            },
-        });
+        await withTransaction(
+            (tx) =>
+                tx.downloadJob.update({
+                    where: { id: job.id },
+                    data: {
+                        status: "failed",
+                        error: `All releases and albums exhausted: ${reason}`,
+                        completedAt: new Date(),
+                    },
+                }),
+            { label: "markJobExhausted" }
+        );
 
         // Check batch completion for discovery jobs
         if (job.discoveryBatchId) {
