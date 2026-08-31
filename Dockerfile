@@ -63,6 +63,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # uses) to provide the exact sonames the bundled TF dlopens at runtime:
 #   libcudart.so.11.0  libcublas.so.11  libcublasLt.so.11  libcudnn.so.8
 #   libcufft.so.10     libcurand.so.10  libcusolver.so.11  libcusparse.so.11
+#   libnvrtc.so        (dlopened by cuDNN's cnn_infer engine at inference time)
 # Versions are the coherent CUDA 11.8 / cuDNN 8.7 set (== tensorflow 2.12's
 # [and-cuda] extras). CUDA 11 minor-version compatibility covers the TF build's
 # 11.2 target on any 450+ host driver. Still requires `runtime: nvidia`
@@ -70,6 +71,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install --break-system-packages \
     nvidia-cuda-runtime-cu11==11.8.89 \
+    nvidia-cuda-nvrtc-cu11==11.8.89 \
     nvidia-cublas-cu11==11.11.3.6 \
     nvidia-cudnn-cu11==8.7.0.84 \
     nvidia-cufft-cu11==10.9.0.58 \
@@ -79,6 +81,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Register the wheel-provided CUDA libs with the dynamic linker so the bundled
 # TensorFlow resolves them by soname at runtime (no LD_LIBRARY_PATH needed).
+#
+# cuDNN 8's libcudnn_cnn_infer.so.8 dlopens the *unversioned* "libnvrtc.so" at
+# the first GPU inference. The wheel only ships "libnvrtc.so.11.2", and ldconfig
+# creates versioned sonames but never the bare .so, so we add that symlink
+# ourselves — otherwise every analyzer worker crashes on its first track and the
+# pool restart-loops forever (never falling back to CPU).
 RUN python3 - <<'PY'
 import glob, os, nvidia
 base = os.path.dirname(nvidia.__file__)
@@ -86,6 +94,14 @@ dirs = sorted({os.path.dirname(p) for p in glob.glob(os.path.join(base, "*", "li
 with open("/etc/ld.so.conf.d/nvidia-cuda.conf", "w") as f:
     f.write("\n".join(dirs) + "\n")
 print("Registered CUDA lib dirs:\n" + "\n".join(dirs))
+# Create unversioned .so symlinks that cuDNN dlopens by bare soname (libnvrtc.so).
+for versioned in glob.glob(os.path.join(base, "*", "lib", "libnvrtc.so.*")):
+    if versioned.endswith("-builtins.so") or "builtins" in os.path.basename(versioned):
+        continue
+    link = os.path.join(os.path.dirname(versioned), "libnvrtc.so")
+    if not os.path.exists(link):
+        os.symlink(os.path.basename(versioned), link)
+        print(f"Symlinked {link} -> {os.path.basename(versioned)}")
 PY
 RUN ldconfig
 
