@@ -1092,7 +1092,37 @@ class SimpleDownloadManager {
         const isDiscovery = meta?.downloadType === "discovery";
         const isSpotifyImport = !!meta?.spotifyImportJobId;
         const notificationAlreadySent = meta?.notificationSent === true;
-        
+
+        // Before failing for good: for a user-initiated library album download
+        // that Lidarr couldn't fulfill, fall through to the per-track smart
+        // pipeline (Soulseek → YouTube) using the MusicBrainz tracklist. Runs
+        // detached so this method returns promptly; it finalizes the job and
+        // sends its own notification when done. Guarded so it runs at most once.
+        const fallbackRgMbid: string =
+            meta?.albumMbid || meta?.lidarrMbid || job.targetMbid || "";
+        const eligibleForPerTrackFallback =
+            !isDiscovery &&
+            !isSpotifyImport &&
+            !notificationAlreadySent &&
+            !meta?.perTrackFallbackAttempted &&
+            !!fallbackRgMbid &&
+            !fallbackRgMbid.startsWith("temp-") &&
+            !!meta?.artistName &&
+            !!meta?.albumTitle;
+
+        if (eligibleForPerTrackFallback) {
+            console.log(
+                `   Lidarr exhausted for "${meta.artistName} - ${meta.albumTitle}" — falling through to per-track Soulseek/YouTube`
+            );
+            void this.attemptPerTrackAlbumFallback(
+                job,
+                meta,
+                fallbackRgMbid,
+                reason
+            );
+            return { retried: false, failed: false, jobId: job.id };
+        }
+
         if (!isDiscovery && !isSpotifyImport && !notificationAlreadySent) {
             // Check if any OTHER job for this album already sent a notification
             const otherNotified = await prisma.downloadJob.findFirst({
@@ -1142,6 +1172,150 @@ class SimpleDownloadManager {
 
         return { retried: false, failed: true, jobId: job.id };
     }
+
+    /**
+     * Detached fallback: acquire a whole album track-by-track via Soulseek →
+     * YouTube (using the MusicBrainz tracklist) when Lidarr couldn't fulfill it.
+     * Marks the job attempted immediately (so it can't loop), downloads into the
+     * "Albums" download subdir, scans it into the library, and notifies the user
+     * of the outcome. Never throws — it owns the job's terminal state.
+     */
+    private async attemptPerTrackAlbumFallback(
+        job: any,
+        meta: any,
+        rgMbid: string,
+        lidarrReason: string
+    ): Promise<void> {
+        const artist: string = meta.artistName;
+        const album: string = meta.albumTitle;
+        const subject = job.subject || `${artist} - ${album}`;
+        try {
+            // Guard against re-entry and show progress instead of "failed".
+            await prisma.downloadJob.update({
+                where: { id: job.id },
+                data: {
+                    status: "processing",
+                    error: null,
+                    metadata: { ...meta, perTrackFallbackAttempted: true },
+                },
+            });
+
+            const { acquireAlbumSmart } = await import("./trackAcquisition");
+            const res = await acquireAlbumSmart(
+                job.userId,
+                { artist, album, rgMbid },
+                { downloadSubdir: "Albums" }
+            );
+
+            if (res.landed > 0) {
+                // Fold the downloaded files into the library (LIBRARY, not DISCOVER).
+                try {
+                    const { getSystemSettings } = await import(
+                        "../utils/systemSettings"
+                    );
+                    const settings = await getSystemSettings();
+                    const downloadBase = settings?.downloadPath || "/downloads";
+                    const pathMod = await import("path");
+                    const { scanQueue } = await import("../workers/queues");
+                    await scanQueue.add("scan", {
+                        userId: job.userId,
+                        musicPath: pathMod.join(downloadBase, "Albums"),
+                        basePath: downloadBase,
+                        source: "album-pertrack-fallback",
+                        playlistOnlyMode: false,
+                    });
+                } catch (scanErr) {
+                    console.error(
+                        "[Album Fallback] Failed to enqueue scan:",
+                        scanErr
+                    );
+                }
+
+                await prisma.downloadJob.update({
+                    where: { id: job.id },
+                    data: {
+                        status: "completed",
+                        completedAt: new Date(),
+                        error: null,
+                        metadata: {
+                            ...meta,
+                            perTrackFallbackAttempted: true,
+                            notificationSent: true,
+                            perTrackFallback: {
+                                landed: res.landed,
+                                total: res.total,
+                                sources: res.sources,
+                            },
+                        },
+                    },
+                });
+
+                const via: string[] = [];
+                if (res.sources.soulseek)
+                    via.push(`${res.sources.soulseek} via Soulseek`);
+                if (res.sources.youtube)
+                    via.push(`${res.sources.youtube} via YouTube`);
+                await notificationService.notifySystem(
+                    job.userId,
+                    "Album Downloaded",
+                    `Got ${res.landed}/${res.total} tracks for ${subject}${
+                        via.length ? ` (${via.join(", ")})` : ""
+                    }. Lidarr didn't have it, so tracks were fetched individually.`
+                );
+                return;
+            }
+
+            // Nothing landed — fail for real now.
+            await prisma.downloadJob.update({
+                where: { id: job.id },
+                data: {
+                    status: "failed",
+                    error: `All releases and albums exhausted: ${lidarrReason}`,
+                    completedAt: new Date(),
+                    metadata: {
+                        ...meta,
+                        perTrackFallbackAttempted: true,
+                        notificationSent: true,
+                    },
+                },
+            });
+            await notificationService.notifyDownloadFailed(
+                job.userId,
+                subject,
+                res.total === 0
+                    ? `${lidarrReason}; no tracklist available to fetch individually`
+                    : `${lidarrReason}; couldn't find any of the ${res.total} tracks on Soulseek or YouTube`
+            );
+        } catch (err: any) {
+            console.error(
+                "[Album Fallback] Per-track fallback errored:",
+                err?.message || err
+            );
+            try {
+                await prisma.downloadJob.update({
+                    where: { id: job.id },
+                    data: {
+                        status: "failed",
+                        error: `All releases and albums exhausted: ${lidarrReason}`,
+                        completedAt: new Date(),
+                        metadata: {
+                            ...meta,
+                            perTrackFallbackAttempted: true,
+                            notificationSent: true,
+                        },
+                    },
+                });
+                await notificationService.notifyDownloadFailed(
+                    job.userId,
+                    subject,
+                    lidarrReason
+                );
+            } catch {
+                /* ignore */
+            }
+        }
+    }
+
     // Timeout for "no sources" - if Lidarr hasn't grabbed anything after searching
     private readonly NO_SOURCE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (indexer searches can be slow)
 

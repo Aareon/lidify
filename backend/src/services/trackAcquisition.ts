@@ -18,6 +18,7 @@ import path from "path";
 import { soulseekService } from "./soulseek";
 import { youtubeMusicService } from "./youtube-music";
 import { queueAlbumUpgrade } from "./albumUpgrade";
+import { musicBrainzService } from "./musicbrainz";
 import { rewriteAudioTags } from "../utils/audioTags";
 import { getSystemSettings } from "../utils/systemSettings";
 
@@ -56,6 +57,12 @@ export async function acquireTrackSmart(
          * actually lands even when Lidarr can't get the album.
          */
         lidarrHandledSkipsYouTube?: boolean;
+        /**
+         * Skip the Lidarr album-grab step entirely (Soulseek → YouTube only).
+         * Used by the album-level fallback, where Lidarr has already been tried
+         * for the whole album and failed — re-queuing it per track is wasteful.
+         */
+        skipLidarr?: boolean;
     }
 ): Promise<AcquireTrackResult> {
     const settings = await getSystemSettings();
@@ -110,9 +117,11 @@ export async function acquireTrackSmart(
     }
 
     // 2) Smart upgrade: queue a background Lidarr album grab (deduped per album).
-    const upgrade = await queueAlbumUpgrade(userId, track.artist, albumFolder);
-    if (upgrade.handled && opts.lidarrHandledSkipsYouTube !== false) {
-        return { success: true, source: "lidarr" };
+    if (!opts.skipLidarr) {
+        const upgrade = await queueAlbumUpgrade(userId, track.artist, albumFolder);
+        if (upgrade.handled && opts.lidarrHandledSkipsYouTube !== false) {
+            return { success: true, source: "lidarr" };
+        }
     }
     // Otherwise the Lidarr grab (if any) runs in the background and we still fall
     // through to YouTube so the track lands now.
@@ -169,4 +178,71 @@ export async function acquireTrackSmart(
             error: err?.message || "YouTube download failed",
         };
     }
+}
+
+export interface AcquireAlbumResult {
+    total: number;
+    landed: number;
+    // Per-source tally of the tracks that landed, for the completion notice.
+    sources: { soulseek: number; youtube: number };
+}
+
+/**
+ * Album-level fallback for when Lidarr can't fulfill a whole-album download.
+ * Fetches the album's MusicBrainz tracklist and runs the per-track smart
+ * pipeline (Soulseek → YouTube; Lidarr is skipped because it already failed for
+ * this album) for each track. Files land under `<downloadSubdir>/<artist>/<album>`
+ * so a subsequent library scan folds them into the album. Sequential on purpose
+ * — parallel Soulseek/yt-dlp would hammer both engines.
+ */
+export async function acquireAlbumSmart(
+    userId: string,
+    album: { artist: string; album: string; rgMbid: string },
+    opts: { downloadSubdir: string }
+): Promise<AcquireAlbumResult> {
+    const result: AcquireAlbumResult = {
+        total: 0,
+        landed: 0,
+        sources: { soulseek: 0, youtube: 0 },
+    };
+
+    let mbTracks: Array<{ title: string; lengthMs: number | null }> = [];
+    try {
+        mbTracks = await musicBrainzService.getAlbumTracklist(album.rgMbid);
+    } catch {
+        mbTracks = [];
+    }
+    result.total = mbTracks.length;
+    if (mbTracks.length === 0) return result;
+
+    for (const mb of mbTracks) {
+        if (!mb.title) continue;
+        try {
+            const r = await acquireTrackSmart(
+                userId,
+                {
+                    artist: album.artist,
+                    title: mb.title,
+                    album: album.album,
+                    durationMs: mb.lengthMs ?? undefined,
+                },
+                {
+                    downloadSubdir: opts.downloadSubdir,
+                    skipLidarr: true, // Lidarr already failed for this album
+                    lidarrHandledSkipsYouTube: false,
+                }
+            );
+            if (r.success && r.source === "soulseek") {
+                result.landed++;
+                result.sources.soulseek++;
+            } else if (r.success && r.source === "youtube") {
+                result.landed++;
+                result.sources.youtube++;
+            }
+        } catch {
+            // Skip a track that errors; keep going through the rest of the album.
+        }
+    }
+
+    return result;
 }
