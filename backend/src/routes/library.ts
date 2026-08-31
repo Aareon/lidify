@@ -5903,11 +5903,17 @@ router.get("/radio", async (req, res) => {
                 trackIds = allTracks.map((t) => t.id);
         }
 
-        // For vibe mode, keep the sorted order (by match score)
-        // For other modes, shuffle the results
+        // For vibe mode, pull a WIDER match-ranked candidate pool than the final
+        // limit so the per-artist cap below can reach past a dominant artist and
+        // include more distinct artists (otherwise the top-N is all one band).
+        // For other modes, shuffle the results.
+        const vibeCandidatePool = Math.min(
+            trackIds.length,
+            Math.max(limitNum * 6, 300)
+        );
         const finalIds =
             type === "vibe"
-                ? trackIds.slice(0, limitNum) // Already sorted by match score
+                ? trackIds.slice(0, vibeCandidatePool) // sorted by match score
                 : shuffle(trackIds).slice(0, limitNum);
 
         if (finalIds.length === 0) {
@@ -6128,10 +6134,85 @@ router.get("/radio", async (req, res) => {
             }),
         }));
 
-        // For vibe mode, keep sorted order. For other modes, shuffle.
+        // Spread same-artist tracks out so a vibe queue doesn't play a whole
+        // album back-to-back. Walks the match-ranked list greedily: at each slot
+        // it takes the highest-ranked remaining track whose artist (and, when
+        // possible, album) hasn't appeared in the last `gap` picks, so match
+        // quality is preserved while artists are interleaved. Degrades to
+        // best-available when a niche pool is dominated by one artist.
+        const diversifyByArtist = <
+            T extends { artist?: { id?: string }; album?: { id?: string } }
+        >(
+            ranked: T[],
+            gap = 2
+        ): T[] => {
+            const remaining = [...ranked];
+            const result: T[] = [];
+            const recentArtists: string[] = [];
+            const recentAlbums: string[] = [];
+            while (remaining.length > 0) {
+                let idx = remaining.findIndex(
+                    (t) =>
+                        !recentArtists.includes(t.artist?.id || "") &&
+                        !recentAlbums.includes(t.album?.id || "")
+                );
+                // Relax to artist-only spacing, then take the best remaining.
+                if (idx === -1) {
+                    idx = remaining.findIndex(
+                        (t) => !recentArtists.includes(t.artist?.id || "")
+                    );
+                }
+                if (idx === -1) idx = 0;
+                const [picked] = remaining.splice(idx, 1);
+                result.push(picked);
+                recentArtists.push(picked.artist?.id || "");
+                recentAlbums.push(picked.album?.id || "");
+                if (recentArtists.length > gap) recentArtists.shift();
+                if (recentAlbums.length > gap) recentAlbums.shift();
+            }
+            return result;
+        };
+
+        // Cap how many tracks any one artist contributes to a vibe queue, walking
+        // the match-ranked pool so the best tracks per artist survive. This is what
+        // stops "50 tracks that are mostly one band" — once an artist hits the cap,
+        // its lower-ranked tracks are dropped and more distinct artists fill in.
+        const capPerArtist = <T extends { artist?: { id?: string } }>(
+            ranked: T[],
+            max: number
+        ): T[] => {
+            const counts = new Map<string, number>();
+            const out: T[] = [];
+            for (const t of ranked) {
+                const key = t.artist?.id || "";
+                const c = counts.get(key) || 0;
+                if (c >= max) continue;
+                counts.set(key, c + 1);
+                out.push(t);
+            }
+            return out;
+        };
+
+        // For vibe mode: cap per artist for variety, but BACKFILL from the
+        // over-cap remainder if that leaves the queue short (a niche vibe pool
+        // dominated by one or two artists) so we still return a full queue.
+        // Then spread artists so it's varied end-to-end. Other modes shuffle.
+        const buildVibeQueue = (ranked: typeof transformedTracks) => {
+            const maxPerArtist = Number(process.env.VIBE_MAX_PER_ARTIST) || 5;
+            const selection = capPerArtist(ranked, maxPerArtist);
+            if (selection.length < limitNum) {
+                const chosen = new Set(selection.map((t) => t.id));
+                for (const t of ranked) {
+                    if (selection.length >= limitNum) break;
+                    if (!chosen.has(t.id)) selection.push(t);
+                }
+            }
+            return diversifyByArtist(selection.slice(0, limitNum), 2);
+        };
+
         const finalTracks =
             type === "vibe"
-                ? transformedTracks
+                ? buildVibeQueue(transformedTracks)
                 : shuffle(transformedTracks);
 
         // Include source features if this was a vibe request

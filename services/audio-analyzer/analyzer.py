@@ -23,6 +23,8 @@ import sys
 import json
 import time
 import logging
+import subprocess
+import tempfile
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
 import traceback
@@ -77,7 +79,9 @@ except ImportError as e:
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 MUSIC_PATH = os.getenv("MUSIC_PATH", "/music")
-DOWNLOAD_PATH = os.getenv("DOWNLOAD_PATH", "")
+# Where download-storage tracks (YouTube/Soulseek singles) physically live.
+# Defaults to the standard /downloads mount so they can be analyzed too.
+DOWNLOAD_PATH = os.getenv("DOWNLOAD_PATH", "/downloads")
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10"))
 SLEEP_INTERVAL = int(os.getenv("SLEEP_INTERVAL", "5"))
 
@@ -977,10 +981,49 @@ def _init_worker_process():
     logger.info(f"Worker process {os.getpid()} initialized with analyzer")
 
 
-def _analyze_track_in_process(args: Tuple[str, str]) -> Tuple[str, str, Dict[str, Any]]:
+def _transcode_to_wav(src_path: str) -> Optional[str]:
+    """Decode an Essentia-unsupported file (e.g. Opus from YouTube) to a temp
+    44.1kHz WAV via system ffmpeg (which supports these codecs) so Essentia can
+    analyze it. Returns the temp WAV path, or None on failure. Caller deletes it.
+    """
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(suffix=".wav", prefix="vibe_analyze_")
+        os.close(fd)
+        result = subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-i", src_path,
+             "-ac", "2", "-ar", "44100", tmp],
+            capture_output=True, timeout=180,
+        )
+        if result.returncode != 0 or not os.path.exists(tmp) or os.path.getsize(tmp) == 0:
+            logger.error(
+                f"ffmpeg transcode failed for {src_path}: "
+                f"{result.stderr.decode('utf-8', 'ignore')[:200]}"
+            )
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+            return None
+        return tmp
+    except Exception as e:
+        logger.error(f"Transcode error for {src_path}: {e}")
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+        return None
+
+
+# Codecs Essentia's bundled AudioLoader can't decode — transcode these first.
+TRANSCODE_EXTENSIONS = (".opus",)
+
+
+def _analyze_track_in_process(args) -> Tuple[str, str, Dict[str, Any]]:
     """
     Analyze a single track in a worker process.
     Returns (track_id, file_path, features_dict or error_dict)
+
+    args is (track_id, file_path) or (track_id, file_path, file_storage).
 
     The result dict may contain:
     - '_error': Error message (marks as failed)
@@ -988,20 +1031,17 @@ def _analyze_track_in_process(args: Tuple[str, str]) -> Tuple[str, str, Dict[str
     - '_file_size_mb': File size in MB (for logging/diagnostics)
     """
     global _process_analyzer
-    track_id, file_path = args
+    track_id = args[0]
+    file_path = args[1]
+    file_storage = args[2] if len(args) > 2 else "music"
 
+    temp_transcode = None
     try:
         # Normalize path separators (Windows paths -> Unix)
         normalized_path = file_path.replace("\\", "/")
         lower_path = normalized_path.lower()
-        if lower_path.endswith(".opus"):
-            return (
-                track_id,
-                file_path,
-                {"_error": "Skipped Opus file", "_skip": True},
-            )
 
-        # Skip playlist downloads - only analyze main library
+        # Skip playlist downloads - only analyze main library + downloaded singles
         if normalized_path.startswith("Playlists/"):
             return (
                 track_id,
@@ -1009,14 +1049,29 @@ def _analyze_track_in_process(args: Tuple[str, str]) -> Tuple[str, str, Dict[str
                 {"_error": "Skipped playlist track", "_skip": True},
             )
 
-        full_path = os.path.join(MUSIC_PATH, normalized_path)
+        # Resolve the storage root: download-storage tracks (YouTube/Soulseek
+        # singles) live under DOWNLOAD_PATH, the main library under MUSIC_PATH.
+        base_path = (
+            DOWNLOAD_PATH
+            if file_storage == "download" and DOWNLOAD_PATH
+            else MUSIC_PATH
+        )
+        full_path = os.path.join(base_path, normalized_path)
 
+        # Fall back to the other root if the labeled one doesn't have it.
         if not os.path.exists(full_path):
-            return (
-                track_id,
-                file_path,
-                {"_error": "Skipped non-library track", "_skip": True},
+            other_root = (
+                MUSIC_PATH if base_path != MUSIC_PATH else (DOWNLOAD_PATH or MUSIC_PATH)
             )
+            alt_path = os.path.join(other_root, normalized_path)
+            if os.path.exists(alt_path):
+                full_path = alt_path
+            else:
+                return (
+                    track_id,
+                    file_path,
+                    {"_error": "Skipped non-library track", "_skip": True},
+                )
 
         # Check file size before processing
         file_size_bytes = os.path.getsize(full_path)
@@ -1037,14 +1092,34 @@ def _analyze_track_in_process(args: Tuple[str, str]) -> Tuple[str, str, Dict[str
                 },
             )
 
+        # Essentia's bundled build can't decode some codecs (e.g. Opus from
+        # YouTube). Transcode those to a temp WAV via system ffmpeg first.
+        analyze_path = full_path
+        if lower_path.endswith(TRANSCODE_EXTENSIONS):
+            temp_transcode = _transcode_to_wav(full_path)
+            if not temp_transcode:
+                # Transient (ffmpeg hiccup) — allow a retry rather than skip.
+                return (
+                    track_id,
+                    file_path,
+                    {"_error": "Failed to transcode for analysis"},
+                )
+            analyze_path = temp_transcode
+
         # Run analysis
-        features = _process_analyzer.analyze(full_path)
+        features = _process_analyzer.analyze(analyze_path)
         features["_file_size_mb"] = file_size_mb
         return (track_id, file_path, features)
 
     except Exception as e:
         logger.error(f"Analysis error for {file_path}: {e}")
         return (track_id, file_path, {"_error": str(e)})
+    finally:
+        if temp_transcode:
+            try:
+                os.remove(temp_transcode)
+            except Exception:
+                pass
 
 
 class AnalysisWorker:
@@ -1353,7 +1428,13 @@ class AnalysisWorker:
             if not job_data:
                 break
             job = json.loads(job_data)
-            queued_jobs.append((job["trackId"], job.get("filePath", "")))
+            queued_jobs.append(
+                (
+                    job["trackId"],
+                    job.get("filePath", ""),
+                    job.get("fileStorage", "music"),
+                )
+            )
 
         if queued_jobs:
             self._process_tracks_parallel(queued_jobs)
@@ -1364,7 +1445,7 @@ class AnalysisWorker:
         try:
             cursor.execute(
                 """
-                SELECT id, "filePath"
+                SELECT id, "filePath", "fileStorage"
                 FROM "Track"
                 WHERE "analysisStatus" = 'pending'
                 ORDER BY "fileModified" DESC
@@ -1387,7 +1468,10 @@ class AnalysisWorker:
                 return False
 
             # Convert to list of tuples
-            track_list = [(t["id"], t["filePath"]) for t in tracks]
+            track_list = [
+                (t["id"], t["filePath"], t.get("fileStorage", "music"))
+                for t in tracks
+            ]
             self._process_tracks_parallel(track_list)
             return True
 
