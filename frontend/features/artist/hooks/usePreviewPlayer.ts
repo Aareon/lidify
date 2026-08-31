@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { Track } from "../types";
-import { howlerEngine } from "@/lib/howler-engine";
+import { useAudio } from "@/lib/audio-context";
 
 interface PreviewAlbumInfo {
     title: string;
@@ -14,243 +14,188 @@ interface UsePreviewPlayerOptions {
     tracks?: Track[];
 }
 
+/** Synthetic id prefix for a preview loaded into the main player. */
+const PREVIEW_PREFIX = "preview-";
+
+/**
+ * Plays 30s Deezer previews THROUGH the main player (as a synthetic track whose
+ * source is the preview URL). This means the preview shows in the player with
+ * progress + play/pause, and can never play "on top of" a real track — the
+ * player only plays one thing at a time.
+ */
 export function usePreviewPlayer(options: UsePreviewPlayerOptions = {}) {
     const { artistName, tracks } = options;
-    const [previewTrack, setPreviewTrack] = useState<string | null>(null);
-    const [previewPlaying, setPreviewPlaying] = useState(false);
-    const [previewAlbumInfo, setPreviewAlbumInfo] = useState<Record<string, PreviewAlbumInfo>>({});
-    const [noPreviewTracks, setNoPreviewTracks] = useState<Set<string>>(new Set());
-    const previewAudioRef = useRef<HTMLAudioElement | null>(null);
-    const mainPlayerWasPausedRef = useRef(false);
+    const { currentTrack, isPlaying, playTracks, pause, resume } = useAudio();
+
+    const [previewAlbumInfo, setPreviewAlbumInfo] = useState<
+        Record<string, PreviewAlbumInfo>
+    >({});
+    const [noPreviewTracks, setNoPreviewTracks] = useState<Set<string>>(
+        new Set()
+    );
     const previewRequestIdRef = useRef(0);
     const noPreviewTrackIdsRef = useRef<Set<string>>(new Set());
     const toastShownForNoPreviewRef = useRef<Set<string>>(new Set());
     const inFlightTrackIdRef = useRef<string | null>(null);
 
-    const isAbortError = (err: unknown) => {
-        if (!err || typeof err !== "object") return false;
-        const e = err as Record<string, unknown>;
-        const name = typeof e.name === "string" ? e.name : "";
-        const code = typeof e.code === "number" ? e.code : undefined;
-        const message = typeof e.message === "string" ? e.message : "";
-        return (
-            name === "AbortError" ||
-            code === 20 ||
-            message.includes("interrupted by a call to pause")
-        );
-    };
+    // Which original track (if any) is currently loaded in the player as a preview.
+    const previewTrack =
+        currentTrack?.id && currentTrack.id.startsWith(PREVIEW_PREFIX)
+            ? currentTrack.id.slice(PREVIEW_PREFIX.length)
+            : null;
+    const previewPlaying = previewTrack !== null && isPlaying;
 
     const showNoPreviewToast = (trackId: string) => {
         if (toastShownForNoPreviewRef.current.has(trackId)) return;
         toastShownForNoPreviewRef.current.add(trackId);
-        // Small, out-of-the-way notification (not an "error" state)
         toast("No Deezer preview available", { duration: 1500 });
     };
 
     async function handlePreview(
         track: Track,
-        artistName: string,
+        artistNameArg: string,
         e: React.MouseEvent
     ) {
         e.stopPropagation();
+        const previewId = `${PREVIEW_PREFIX}${track.id}`;
 
-        // If clicking the same track that's playing, pause it
-        if (previewTrack === track.id && previewPlaying) {
-            previewAudioRef.current?.pause();
-            setPreviewPlaying(false);
-            // Don't auto-resume main player - let user manually click play
-            // This prevents the "pop in" effect when spam-clicking preview
+        // If this preview is already the current player track, toggle play/pause.
+        if (currentTrack?.id === previewId) {
+            if (isPlaying) pause();
+            else resume();
             return;
         }
 
-        // If clicking a different track, stop current and play new
-        if (previewTrack !== track.id) {
-            try {
-                if (inFlightTrackIdRef.current === track.id) {
-                    return;
-                }
-                if (noPreviewTrackIdsRef.current.has(track.id)) {
-                    showNoPreviewToast(track.id);
-                    return;
-                }
+        if (inFlightTrackIdRef.current === track.id) return;
+        if (noPreviewTrackIdsRef.current.has(track.id)) {
+            showNoPreviewToast(track.id);
+            return;
+        }
 
-                const requestId = ++previewRequestIdRef.current;
-                inFlightTrackIdRef.current = track.id;
+        try {
+            const requestId = ++previewRequestIdRef.current;
+            inFlightTrackIdRef.current = track.id;
 
-                const response = await api.getTrackPreview(
-                    artistName,
-                    track.title
-                );
-                if (requestId !== previewRequestIdRef.current) return;
-                if (response.previewUrl) {
-                    // Stop current preview if any
-                    if (previewAudioRef.current) {
-                        previewAudioRef.current.pause();
-                        previewAudioRef.current = null;
-                    }
+            const response = await api.getTrackPreview(artistNameArg, track.title);
+            if (requestId !== previewRequestIdRef.current) return;
 
-                    // Pause the main player if it's playing
-                    if (howlerEngine.isPlaying()) {
-                        howlerEngine.pause();
-                        mainPlayerWasPausedRef.current = true;
-                    }
-
-                    // Store album info from Deezer
-                    if (response.albumTitle) {
-                        setPreviewAlbumInfo(prev => ({
-                            ...prev,
-                            [track.id]: {
-                                title: response.albumTitle!,
-                                cover: response.albumCover || null,
-                            }
-                        }));
-                    }
-
-                    // Create new audio element
-                    const audio = new Audio(response.previewUrl);
-                    previewAudioRef.current = audio;
-                    setPreviewTrack(track.id);
-
-                    audio.onended = () => {
-                        setPreviewPlaying(false);
-                        setPreviewTrack(null);
-                        // Don't auto-resume main player - let user manually click play
-                        mainPlayerWasPausedRef.current = false;
-                    };
-
-                    audio.onerror = () => {
-                        toast.error("Failed to load preview");
-                        setPreviewPlaying(false);
-                        setPreviewTrack(null);
-                    };
-
-                    try {
-                        await audio.play();
-                    } catch (err: unknown) {
-                        // Common when user clicks quickly and we pause/replace audio.
-                        // Treat AbortError as non-fatal and avoid console spam.
-                        if (isAbortError(err)) return;
-                        throw err;
-                    }
-                    setPreviewPlaying(true);
-                } else {
-                    noPreviewTrackIdsRef.current.add(track.id);
-                    showNoPreviewToast(track.id);
-                }
-            } catch (error: unknown) {
-                if (isAbortError(error)) return;
-                if (
-                    typeof error === "object" &&
-                    error !== null &&
-                    (((error as Record<string, unknown>).error as unknown) ===
-                        "Preview not found" ||
-                        /preview not found/i.test(
-                            String(
-                                (error as Record<string, unknown>).message || ""
-                            )
-                        ))
-                ) {
-                    noPreviewTrackIdsRef.current.add(track.id);
-                    showNoPreviewToast(track.id);
-                    return;
-                }
-                toast.error("Failed to load preview");
-                console.error("Preview error:", error);
-            } finally {
-                if (inFlightTrackIdRef.current === track.id) {
-                    inFlightTrackIdRef.current = null;
-                }
+            if (!response.previewUrl) {
+                noPreviewTrackIdsRef.current.add(track.id);
+                showNoPreviewToast(track.id);
+                return;
             }
-        } else {
-            // Resume paused preview
-            try {
-                await previewAudioRef.current?.play();
-            } catch (err: unknown) {
-                if (isAbortError(err)) return;
-                console.error("Preview error:", err);
+
+            // Cache the Deezer album info for the row + player display.
+            const albumTitle =
+                response.albumTitle ||
+                (track.album?.title && track.album.title !== "Unknown Album"
+                    ? track.album.title
+                    : "");
+            const albumCover = response.albumCover || track.album?.coverArt || null;
+            if (response.albumTitle) {
+                setPreviewAlbumInfo((prev) => ({
+                    ...prev,
+                    [track.id]: {
+                        title: response.albumTitle!,
+                        cover: response.albumCover || null,
+                    },
+                }));
             }
-            setPreviewPlaying(true);
+
+            // Play the preview through the main player as a one-off track.
+            playTracks(
+                [
+                    {
+                        id: previewId,
+                        title: track.title,
+                        artist: { name: artistNameArg },
+                        album: {
+                            title: albumTitle,
+                            coverArt: albumCover || undefined,
+                        },
+                        duration: 30, // Deezer previews are 30 seconds
+                        previewUrl: response.previewUrl,
+                    },
+                ],
+                0
+            );
+        } catch (error: unknown) {
+            const message =
+                typeof error === "object" && error !== null
+                    ? String(
+                          (error as Record<string, unknown>).error ||
+                              (error as Record<string, unknown>).message ||
+                              ""
+                      )
+                    : "";
+            if (/preview not found/i.test(message)) {
+                noPreviewTrackIdsRef.current.add(track.id);
+                showNoPreviewToast(track.id);
+                return;
+            }
+            toast.error("Failed to load preview");
+            console.error("Preview error:", error);
+        } finally {
+            if (inFlightTrackIdRef.current === track.id) {
+                inFlightTrackIdRef.current = null;
+            }
         }
     }
-
-    // Stop preview when main player starts playing
-    useEffect(() => {
-        const stopPreview = () => {
-            if (previewAudioRef.current) {
-                previewAudioRef.current.pause();
-                previewAudioRef.current = null;
-                setPreviewPlaying(false);
-                setPreviewTrack(null);
-                // Don't resume main player - it's already playing
-                mainPlayerWasPausedRef.current = false;
-            }
-        };
-
-        howlerEngine.on("play", stopPreview);
-        return () => {
-            howlerEngine.off("play", stopPreview);
-        };
-    }, []);
-
-    // Cleanup preview on unmount
-    useEffect(() => {
-        return () => {
-            if (previewAudioRef.current) {
-                previewAudioRef.current.pause();
-                previewAudioRef.current = null;
-            }
-        };
-    }, []);
 
     // Prefetch album info for unowned tracks (runs once after page load)
     useEffect(() => {
         if (!artistName || !tracks || tracks.length === 0) return;
 
-        // Find unowned tracks that need album info
-        const unownedTracks = tracks.filter(track => {
-            const isUnowned = !track.album?.id ||
-                              !track.album?.title ||
-                              track.album.title === "Unknown Album";
+        const unownedTracks = tracks.filter((track) => {
+            const isUnowned =
+                !track.album?.id ||
+                !track.album?.title ||
+                track.album.title === "Unknown Album";
             const alreadyFetched = previewAlbumInfo[track.id];
             return isUnowned && !alreadyFetched;
         });
 
         if (unownedTracks.length === 0) return;
 
-        // Prefetch in background (don't block UI)
         const prefetchAlbumInfo = async () => {
-            // Fetch sequentially with small delay to avoid rate limiting
-            for (const track of unownedTracks.slice(0, 5)) { // Limit to first 5
+            for (const track of unownedTracks.slice(0, 5)) {
                 try {
-                    const response = await api.getTrackPreview(artistName, track.title);
+                    const response = await api.getTrackPreview(
+                        artistName,
+                        track.title
+                    );
                     if (response.albumTitle) {
-                        setPreviewAlbumInfo(prev => ({
+                        setPreviewAlbumInfo((prev) => ({
                             ...prev,
                             [track.id]: {
                                 title: response.albumTitle!,
                                 cover: response.albumCover || null,
-                            }
+                            },
                         }));
                     } else {
-                        // No preview available
-                        setNoPreviewTracks(prev => new Set(prev).add(track.id));
+                        setNoPreviewTracks((prev) =>
+                            new Set(prev).add(track.id)
+                        );
                         noPreviewTrackIdsRef.current.add(track.id);
                     }
                 } catch {
-                    // API error - mark as no preview
-                    setNoPreviewTracks(prev => new Set(prev).add(track.id));
+                    setNoPreviewTracks((prev) => new Set(prev).add(track.id));
                     noPreviewTrackIdsRef.current.add(track.id);
                 }
-                // Small delay between requests
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise((r) => setTimeout(r, 100));
             }
         };
 
-        // Delay prefetch to not block initial page render
         const timeoutId = setTimeout(prefetchAlbumInfo, 500);
         return () => clearTimeout(timeoutId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- previewAlbumInfo is populated by this effect, not a dependency
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- previewAlbumInfo is populated by this effect, not a dependency
     }, [artistName, tracks]);
 
-    return { previewTrack, previewPlaying, previewAlbumInfo, noPreviewTracks, handlePreview };
+    return {
+        previewTrack,
+        previewPlaying,
+        previewAlbumInfo,
+        noPreviewTracks,
+        handlePreview,
+    };
 }

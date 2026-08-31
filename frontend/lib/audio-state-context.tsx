@@ -108,6 +108,9 @@ export interface Track {
     album: { title: string; coverArt?: string; id?: string };
     duration: number;
     filePath?: string;
+    // Direct audio URL for 30s Deezer previews played through the main player.
+    // When set, the engine streams this URL directly (no local file / YouTube).
+    previewUrl?: string;
     // Audio features for vibe mode visualization
     audioFeatures?: {
         bpm?: number | null;

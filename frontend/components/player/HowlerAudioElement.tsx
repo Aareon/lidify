@@ -516,8 +516,13 @@ export const HowlerAudioElement = memo(function HowlerAudioElement() {
                 console.log(`[HowlerAudioElement] controlMode: ${controlModeRef.current}, isActivePlayer: ${isActivePlayerRef.current}`);
                 console.log(`[HowlerAudioElement] STACK TRACE:`, new Error().stack);
 
-                // Check if track has a local file
-                if (currentTrack.filePath) {
+                // 30s Deezer preview — stream the preview URL directly.
+                if (currentTrack.previewUrl) {
+                    console.log(`[HowlerAudioElement] Using PREVIEW stream`);
+                    streamUrl = currentTrack.previewUrl;
+                    source = null;
+                    audioFormat = "mp3";
+                } else if (currentTrack.filePath) {
                     // Local file available - use native streaming
                     console.log(`[HowlerAudioElement] Using LOCAL stream for track`);
                     streamUrl = api.getStreamUrl(currentTrack.id);

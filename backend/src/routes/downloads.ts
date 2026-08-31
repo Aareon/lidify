@@ -864,7 +864,13 @@ router.post("/track", async (req, res) => {
             const result = await acquireTrackSmart(
                 userId,
                 { artist, title, album, durationMs },
-                { downloadSubdir: "Singles" }
+                {
+                    downloadSubdir: "Singles",
+                    // "Download this track now": still queue a Lidarr album grab in
+                    // the background, but fall through to YouTube so the track
+                    // lands even when Lidarr's catalog is missing the album.
+                    lidarrHandledSkipsYouTube: false,
+                }
             );
 
             if (

@@ -831,6 +831,11 @@ class ApiClient {
     getCoverArtUrl(coverId: string, size?: number): string {
         const baseUrl = this.getBaseUrl();
 
+        // Already a full URL (e.g. a Deezer preview cover) — use it as-is.
+        if (coverId && /^https?:\/\//i.test(coverId)) {
+            return coverId;
+        }
+
         // Check if this is an audiobook cover path (served by audiobooks endpoint, not proxied)
         if (coverId && coverId.startsWith("/audiobooks/")) {
             // Return direct path - audiobook covers are served from local disk

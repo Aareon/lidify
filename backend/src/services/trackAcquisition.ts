@@ -47,6 +47,15 @@ export async function acquireTrackSmart(
         /** Pre-computed usability (batch imports compute once); else derived from settings. */
         soulseekUsable?: boolean;
         youtubeUsable?: boolean;
+        /**
+         * When true (default), a queued Lidarr album grab counts as "handled" and
+         * we stop — the track is expected to arrive via Lidarr's import (playlist
+         * behavior: it streams via YouTube meanwhile). When false (single-track
+         * "download this now"), the Lidarr grab is still queued as a background
+         * bonus, but we ALSO fall through to a YouTube download so the track
+         * actually lands even when Lidarr can't get the album.
+         */
+        lidarrHandledSkipsYouTube?: boolean;
     }
 ): Promise<AcquireTrackResult> {
     const settings = await getSystemSettings();
@@ -102,9 +111,11 @@ export async function acquireTrackSmart(
 
     // 2) Smart upgrade: queue a background Lidarr album grab (deduped per album).
     const upgrade = await queueAlbumUpgrade(userId, track.artist, albumFolder);
-    if (upgrade.handled) {
+    if (upgrade.handled && opts.lidarrHandledSkipsYouTube !== false) {
         return { success: true, source: "lidarr" };
     }
+    // Otherwise the Lidarr grab (if any) runs in the background and we still fall
+    // through to YouTube so the track lands now.
 
     // 3) YouTube fallback.
     if (!youtubeUsable) {
