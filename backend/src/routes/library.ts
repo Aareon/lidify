@@ -26,7 +26,12 @@ import { enrichSimilarArtist, prefetchDiscographyCovers } from "../workers/artis
 import { extractColorsFromImage } from "../utils/colorExtractor";
 import { dataCacheService } from "../services/dataCache";
 import { fetchExternalImage, normalizeExternalImageUrl } from "../services/imageProxy";
-import { youtubeMusicService, ytdlpCookieArgs } from "../services/youtube-music";
+import {
+    youtubeMusicService,
+    ytdlpCookieArgs,
+    ytdlpClientArgs,
+    ytdlpWatchUrl,
+} from "../services/youtube-music";
 import axios from "axios";
 // MusicBrainz secondary types to exclude from discography
 const EXCLUDED_SECONDARY_TYPES = [
@@ -3911,16 +3916,16 @@ async function precacheYouTubeTrack(videoId: string): Promise<void> {
     
     // Create download promise and track it
     const downloadPromise = (async () => {
-        const url = `https://music.youtube.com/watch?v=${videoId}`;
+        const url = ytdlpWatchUrl(videoId);
         const command = [
             "yt-dlp",
             ytdlpCookieArgs(), // --cookies <file> when configured (bot-check bypass)
+            ytdlpClientArgs(), // player_client list that returns downloadable formats
             "-x",
             "--audio-format", "opus",
             "--audio-quality", "0",
             "-o", `"${tempPath}"`,
             "--no-warnings",
-            // No player_client pin: android_vr is broken (HTTP 403 / no formats).
             `"${url}"`,
         ].join(" ");
 
@@ -4075,16 +4080,16 @@ router.get("/youtube/stream/:videoId", async (req, res) => {
                         }
                         
                         const tempPath = path.join(tempDir, `${videoId}.opus`);
-                        const url = `https://music.youtube.com/watch?v=${videoId}`;
+                        const url = ytdlpWatchUrl(videoId);
                         const command = [
                             "yt-dlp",
                             ytdlpCookieArgs(), // --cookies <file> when configured (bot-check bypass)
+                            ytdlpClientArgs(), // player_client list that returns downloadable formats
                             "-x",
                             "--audio-format", "opus",
                             "--audio-quality", "0",
                             "-o", `"${tempPath}"`,
                             "--no-warnings",
-                            // No player_client pin: android_vr is broken (HTTP 403).
                             `"${url}"`,
                         ].join(" ");
                         

@@ -129,6 +129,24 @@ export function ytdlpCookieArgs(): string {
     return "";
 }
 
+// YouTube's default `web`/`web_music` clients now return SABR-only formats that
+// need a GVS PO token, so a plain `-x` yields "Requested format is not
+// available". Requesting a client list that still serves downloadable formats
+// (tv/android) alongside the default fixes it. Verified working 2026-08-31 with
+// a youtube.com watch URL (music.youtube.com forces the PO-gated web_music
+// client and ignores this override — always build watchUrl() below).
+const YTDLP_PLAYER_CLIENTS =
+    process.env.YTDLP_PLAYER_CLIENTS || "default,tv,android";
+export function ytdlpClientArgs(): string {
+    return `--extractor-args "youtube:player_client=${YTDLP_PLAYER_CLIENTS}"`;
+}
+
+// Always use the standard watch URL for yt-dlp — the music.youtube.com host
+// pins the extractor to the web_music client (PO-token gated).
+export function ytdlpWatchUrl(videoId: string): string {
+    return `https://www.youtube.com/watch?v=${videoId}`;
+}
+
 // Cache TTLs
 const STREAM_URL_TTL = 4 * 60 * 60; // 4 hours (conservative vs 5-6h expiry)
 const MATCH_CACHE_TTL = 24 * 60 * 60; // 24 hours
@@ -1567,14 +1585,15 @@ class YouTubeMusicService {
 
         // Extract fresh URL via yt-dlp
         console.log(`[YouTube Music] Extracting stream URL for ${videoId} via yt-dlp...`);
-        const url = `https://music.youtube.com/watch?v=${videoId}`;
+        const url = ytdlpWatchUrl(videoId);
 
         try {
             const cookieArgs = ytdlpCookieArgs();
+            const clientArgs = ytdlpClientArgs();
 
             // Get best audio stream URL
             const { stdout } = await execPromise(
-                `yt-dlp ${cookieArgs} -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" -g --no-warnings "${url}"`,
+                `yt-dlp ${cookieArgs} ${clientArgs} -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" -g --no-warnings "${url}"`,
                 { timeout: 30000 }
             );
 
@@ -1585,7 +1604,7 @@ class YouTubeMusicService {
 
             // Get format info
             const { stdout: formatInfo } = await execPromise(
-                `yt-dlp ${cookieArgs} -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" --print "%(ext)s" --no-warnings "${url}"`,
+                `yt-dlp ${cookieArgs} ${clientArgs} -f "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio" --print "%(ext)s" --no-warnings "${url}"`,
                 { timeout: 10000 }
             ).catch(() => ({ stdout: "webm" }));
 
@@ -1647,7 +1666,7 @@ class YouTubeMusicService {
             throw new Error("YouTube Music is disabled");
         }
 
-        const url = `https://music.youtube.com/watch?v=${videoId}`;
+        const url = ytdlpWatchUrl(videoId);
         const format = DOWNLOAD_FORMAT;
 
         // Ensure output directory exists
@@ -1690,6 +1709,7 @@ class YouTubeMusicService {
             const command = [
                 "yt-dlp",
                 ytdlpCookieArgs(), // --cookies <file> when configured (bot-check bypass)
+                ytdlpClientArgs(), // player_client list that returns downloadable formats
                 "-x", // Extract audio
                 "--audio-format", format,
                 "--audio-quality", "0", // 0 = best available (no upsampling)
