@@ -42,7 +42,7 @@ export class FileValidatorService {
         console.log("[FileValidator] Starting library validation...");
 
         const settings = await prisma.systemSettings.findFirst();
-        const downloadPath = settings?.downloadPath || "/soulseek-downloads";
+        const downloadPath = settings?.downloadPath || "/downloads";
 
         // Get all tracks from the database
         const tracks = await prisma.track.findMany({
@@ -105,6 +105,31 @@ export class FileValidatorService {
 
         result.tracksMissing = missingTrackIds;
 
+        // SAFETY: a large fraction of the library going "missing" at once almost
+        // always means a systemic problem — an unmounted /music or /downloads, or
+        // a stale/misconfigured downloadPath — NOT that the files genuinely
+        // vanished. Deleting then is catastrophic and effectively unrecoverable
+        // (download-storage tracks are only re-added by a download-path scan, never
+        // by a normal /music scan). Abort and alert instead of wiping the library.
+        const totalTracks = tracks.length;
+        const missingCount = missingTrackIds.length;
+        const MASS_DELETE_FRACTION = 0.1; // >10% missing at once = suspicious
+        const MASS_DELETE_FLOOR = 25; // ...but ignore tiny libraries
+        if (
+            missingCount > MASS_DELETE_FLOOR &&
+            missingCount > totalTracks * MASS_DELETE_FRACTION
+        ) {
+            console.error(
+                `[FileValidator] ABORTING removal: ${missingCount}/${totalTracks} tracks ` +
+                    `flagged missing (>${Math.round(MASS_DELETE_FRACTION * 100)}%). This ` +
+                    `usually means a mount is unavailable or downloadPath is misconfigured ` +
+                    `(music="${config.music.musicPath}", download="${downloadPath}"). ` +
+                    `No tracks were deleted.`
+            );
+            result.duration = Date.now() - startTime;
+            return result;
+        }
+
         // Remove missing tracks from database
         if (missingTrackIds.length > 0) {
             console.log(
@@ -159,7 +184,7 @@ export class FileValidatorService {
         }
 
         const settings = await prisma.systemSettings.findFirst();
-        const downloadPath = settings?.downloadPath || "/soulseek-downloads";
+        const downloadPath = settings?.downloadPath || "/downloads";
 
         const candidateMusic = this.resolveCandidate(
             config.music.musicPath,
