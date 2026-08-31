@@ -2635,17 +2635,47 @@ router.get("/albums/:id", async (req, res) => {
                             ownedByPos.set(`${t.discNo || 1}|${t.trackNo}`, t);
                         }
                     }
+
+                    // A track released BOTH as a single and on this album lives on
+                    // disk under its single "album", so it isn't in album.tracks.
+                    // Match those by (artist + normalized title) so they count as
+                    // owned here too (e.g. "If We Have Each Other" filed under its
+                    // single but part of "Narrated For You"). First match wins.
+                    const ownedElsewhereByTitle = new Map<string, any>();
+                    if (album.artistId) {
+                        const artistTracks = await prisma.track.findMany({
+                            where: {
+                                albumId: { not: album.id },
+                                album: {
+                                    artistId: album.artistId,
+                                    location: "LIBRARY",
+                                },
+                            },
+                            orderBy: { updatedAt: "desc" },
+                        });
+                        for (const t of artistTracks) {
+                            const key = norm(t.title);
+                            if (key && !ownedElsewhereByTitle.has(key)) {
+                                ownedElsewhereByTitle.set(key, t);
+                            }
+                        }
+                    }
+
                     const used = new Set<string>();
                     const merged = mbTracks.map((mb) => {
+                        const ntitle = norm(mb.title);
                         const match =
-                            ownedByTitle.get(norm(mb.title)) ||
-                            ownedByPos.get(`${mb.discNo}|${mb.position}`);
+                            ownedByTitle.get(ntitle) ||
+                            ownedByPos.get(`${mb.discNo}|${mb.position}`) ||
+                            ownedElsewhereByTitle.get(ntitle);
                         if (match) {
                             used.add(match.id);
                             return {
                                 ...match,
-                                trackNo: match.trackNo ?? mb.position,
-                                discNo: match.discNo ?? mb.discNo,
+                                // Order by this album's canonical MB position (a
+                                // single's own trackNo would misplace it here).
+                                trackNo: mb.position ?? match.trackNo,
+                                discNo: mb.discNo ?? match.discNo,
                                 owned: true,
                             };
                         }
