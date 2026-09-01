@@ -1574,6 +1574,55 @@ class LidarrService {
     }
 
     /**
+     * Return the set of downloadIds currently in Lidarr's queue (any status).
+     * Used to detect jobs whose download has LEFT the queue (cancelled / removed /
+     * permanently failed) without importing, so they can be failed promptly
+     * instead of waiting for the coarse stale timeout.
+     *
+     * Returns null when Lidarr is unavailable/unconfigured — callers MUST treat
+     * null as "unknown" and skip cancellation detection (never fail a job just
+     * because we couldn't reach Lidarr).
+     */
+    async getActiveQueueDownloadIds(): Promise<Set<string> | null> {
+        await this.ensureInitialized();
+
+        if (!this.enabled || !this.client) {
+            return null;
+        }
+
+        try {
+            const ids = new Set<string>();
+            let page = 1;
+            const pageSize = 100;
+            const maxPages = 20; // safety cap
+            while (page <= maxPages) {
+                const response = await this.client.get("/api/v1/queue", {
+                    params: {
+                        page,
+                        pageSize,
+                        includeUnknownArtistItems: true,
+                    },
+                    timeout: 15000,
+                });
+                const records = response.data?.records || [];
+                for (const item of records) {
+                    if (item.downloadId) ids.add(String(item.downloadId));
+                }
+                const total = response.data?.totalRecords ?? records.length;
+                if (records.length === 0 || page * pageSize >= total) break;
+                page++;
+            }
+            return ids;
+        } catch (error: any) {
+            console.error(
+                "[LIDARR] Error fetching queue downloadIds:",
+                error.message
+            );
+            return null;
+        }
+    }
+
+    /**
      * Delete artist by Lidarr ID (used for cleanup)
      * Will skip deletion if artist has active downloads in queue
      */

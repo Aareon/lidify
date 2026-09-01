@@ -70,9 +70,10 @@ class QueueCleanerService {
             // PART 0.25: Reconcile processing jobs with Lidarr (fix missed webhooks)
             const reconcileResult =
                 await simpleDownloadManager.reconcileWithLidarr();
-            if (reconcileResult.reconciled > 0) {
+            if (reconcileResult.reconciled > 0 || reconcileResult.cancelled > 0) {
                 console.log(
-                    `✓ Reconciled ${reconcileResult.reconciled} job(s) with Lidarr`
+                    `✓ Reconciled ${reconcileResult.reconciled} completed, ` +
+                        `${reconcileResult.cancelled} cancelled/removed job(s) with Lidarr`
                 );
                 this.emptyQueueChecks = 0; // Reset counter
             }

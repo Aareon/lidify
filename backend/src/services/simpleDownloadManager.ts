@@ -1816,7 +1816,7 @@ class SimpleDownloadManager {
      * 
      * IMPORTANT: Checks by both MBID and artist+album name to handle MBID mismatches
      */
-    async reconcileWithLidarr(): Promise<{ reconciled: number; errors: string[] }> {
+    async reconcileWithLidarr(): Promise<{ reconciled: number; cancelled: number; errors: string[] }> {
         console.log(`\n[RECONCILE] Checking processing jobs against Lidarr...`);
         
         const processingJobs = await prisma.downloadJob.findMany({
@@ -1825,12 +1825,22 @@ class SimpleDownloadManager {
 
         if (processingJobs.length === 0) {
             console.log(`   No processing jobs to reconcile`);
-            return { reconciled: 0, errors: [] };
+            return { reconciled: 0, cancelled: 0, errors: [] };
         }
 
         console.log(`   Found ${processingJobs.length} processing job(s)`);
 
+        // Fetch Lidarr's current queue ONCE so we can detect jobs whose download
+        // has left the queue (cancelled/removed/failed) without importing. null =
+        // Lidarr unreachable → skip cancellation detection (never fail on doubt).
+        const queueDownloadIds =
+            await lidarrService.getActiveQueueDownloadIds();
+        // Grace period before treating an absent-from-queue job as cancelled —
+        // avoids racing a just-grabbed item that hasn't hit the queue yet.
+        const CANCEL_GRACE_MS = 5 * 60 * 1000;
+
         let reconciled = 0;
+        let cancelled = 0;
         const errors: string[] = [];
 
         for (const job of processingJobs) {
@@ -1869,20 +1879,24 @@ class SimpleDownloadManager {
 
                 if (isAvailable) {
                     console.log(`   Job ${job.id}: Album "${job.subject}" found in Lidarr - marking complete`);
-                    
-                    await prisma.downloadJob.update({
-                        where: { id: job.id },
-                        data: {
-                            status: "completed",
-                            completedAt: new Date(),
-                            error: null,
-                            metadata: {
-                                ...metadata,
-                                completedAt: new Date().toISOString(),
-                                reconciledFromLidarr: true,
-                            },
-                        },
-                    });
+
+                    await withTransaction(
+                        (tx) =>
+                            tx.downloadJob.update({
+                                where: { id: job.id },
+                                data: {
+                                    status: "completed",
+                                    completedAt: new Date(),
+                                    error: null,
+                                    metadata: {
+                                        ...metadata,
+                                        completedAt: new Date().toISOString(),
+                                        reconciledFromLidarr: true,
+                                    },
+                                },
+                            }),
+                        { label: "reconcile-complete" }
+                    );
 
                     // Check batch completion for discovery jobs
                     if (job.discoveryBatchId) {
@@ -1891,12 +1905,54 @@ class SimpleDownloadManager {
                     }
 
                     reconciled++;
-                } else {
-                    // Only log for jobs older than 5 minutes
-                    const jobAge = Date.now() - (job.createdAt?.getTime() || 0);
-                    if (jobAge > 5 * 60 * 1000) {
-                        console.log(`   Job ${job.id}: "${job.subject}" not yet available in Lidarr (${Math.round(jobAge / 60000)}m old)`);
+                    continue;
+                }
+
+                // Not in Lidarr's library. If we grabbed it (have a lidarrRef) but
+                // that download is no longer in Lidarr's queue, it was cancelled /
+                // removed / permanently failed — fail it promptly (past a grace
+                // period) instead of leaving it "processing" until the timeout.
+                const jobAge = Date.now() - (job.createdAt?.getTime() || 0);
+                const stillQueued =
+                    job.lidarrRef && queueDownloadIds
+                        ? queueDownloadIds.has(String(job.lidarrRef))
+                        : true; // unknown => assume queued (never fail on doubt)
+
+                if (
+                    job.lidarrRef &&
+                    queueDownloadIds !== null &&
+                    !stillQueued &&
+                    jobAge > CANCEL_GRACE_MS
+                ) {
+                    console.log(
+                        `   Job ${job.id}: "${job.subject}" left Lidarr's queue without importing - marking failed`
+                    );
+                    await withTransaction(
+                        (tx) =>
+                            tx.downloadJob.update({
+                                where: { id: job.id },
+                                data: {
+                                    status: "failed",
+                                    completedAt: new Date(),
+                                    error: "Download left Lidarr's queue without importing (cancelled, removed, or failed)",
+                                    metadata: {
+                                        ...metadata,
+                                        reconciledFromLidarr: true,
+                                        cancelledInLidarr: true,
+                                    },
+                                },
+                            }),
+                        { label: "reconcile-cancelled" }
+                    );
+
+                    if (job.discoveryBatchId) {
+                        const { discoverWeeklyService } = await import("./discoverWeekly");
+                        await discoverWeeklyService.checkBatchCompletion(job.discoveryBatchId);
                     }
+
+                    cancelled++;
+                } else if (jobAge > 5 * 60 * 1000) {
+                    console.log(`   Job ${job.id}: "${job.subject}" not yet available in Lidarr (${Math.round(jobAge / 60000)}m old)`);
                 }
             } catch (error: any) {
                 const msg = `Job ${job.id}: Error checking Lidarr - ${error.message}`;
@@ -1905,8 +1961,10 @@ class SimpleDownloadManager {
             }
         }
 
-        console.log(`[RECONCILE] Reconciled ${reconciled} job(s)`);
-        return { reconciled, errors };
+        console.log(
+            `[RECONCILE] Reconciled ${reconciled} completed, ${cancelled} cancelled/removed job(s)`
+        );
+        return { reconciled, cancelled, errors };
     }
 }
 
