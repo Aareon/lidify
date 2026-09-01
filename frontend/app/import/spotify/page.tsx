@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, Suspense } from "react";
+import { useState, useEffect, useRef, useCallback, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import Image from "next/image";
@@ -123,6 +123,21 @@ const IMPORT_STATUS_META: Record<
 
 type Step = "input" | "preview" | "importing" | "complete";
 
+// Async preview job (matches backend GET /spotify/preview/:jobId).
+type PreviewJobResp = {
+    id: string;
+    status: "fetching" | "matching" | "ready" | "failed";
+    total: number;
+    inLibrary: number;
+    downloadable: number;
+    preview: ImportPreview | null;
+    error: string | null;
+};
+
+// Persist the in-flight preview job id so a browser refresh mid-preview resumes
+// polling the same job instead of losing it.
+const PREVIEW_JOB_LS_KEY = "lidify_active_preview_job";
+
 function SpotifyImportPageContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
@@ -135,6 +150,7 @@ function SpotifyImportPageContent() {
     const [url, setUrl] = useState("");
     const [isLoading, setIsLoading] = useState(false);
     const [preview, setPreview] = useState<ImportPreview | null>(null);
+    const [previewStatus, setPreviewStatus] = useState<string | null>(null);
     const [playlistName, setPlaylistName] = useState("");
     const [importJob, setImportJob] = useState<ImportJob | null>(null);
     const [refreshStatusMessage, setRefreshStatusMessage] = useState<
@@ -148,6 +164,113 @@ function SpotifyImportPageContent() {
     // null = not loaded yet. Offline imports redirect here to watch progress, so
     // this list is how those background jobs surface. Polls while any is active.
     const [imports, setImports] = useState<ImportListItem[] | null>(null);
+
+    // Poll an async preview job until it's ready/failed. Resolves with the
+    // preview, or throws on failure/expiry. Updates the progress label.
+    const pollPreviewJob = useCallback(
+        async (jobId: string): Promise<ImportPreview> => {
+            for (let i = 0; i < 320; i++) {
+                // ~8 min at 1.5s
+                let job: PreviewJobResp;
+                try {
+                    job = await api.get<PreviewJobResp>(
+                        `/spotify/preview/${jobId}`
+                    );
+                } catch (e: any) {
+                    if (e?.status === 404) {
+                        try {
+                            localStorage.removeItem(PREVIEW_JOB_LS_KEY);
+                        } catch {}
+                        throw new Error(
+                            "Preview expired — please try again"
+                        );
+                    }
+                    throw e;
+                }
+                if (job.status === "ready" && job.preview) {
+                    try {
+                        localStorage.removeItem(PREVIEW_JOB_LS_KEY);
+                    } catch {}
+                    return job.preview;
+                }
+                if (job.status === "failed") {
+                    try {
+                        localStorage.removeItem(PREVIEW_JOB_LS_KEY);
+                    } catch {}
+                    throw new Error(
+                        job.error || "Failed to generate preview"
+                    );
+                }
+                setPreviewStatus(
+                    job.status === "fetching"
+                        ? "Fetching playlist…"
+                        : "Matching tracks to your library…"
+                );
+                await new Promise((r) => setTimeout(r, 1500));
+            }
+            throw new Error("Preview timed out");
+        },
+        []
+    );
+
+    // Start an async preview job and poll it to completion.
+    const runPreview = useCallback(
+        async (previewUrl: string) => {
+            setIsLoading(true);
+            setPreviewStatus("Starting…");
+            try {
+                const { jobId } = await api.post<{
+                    jobId: string;
+                    status: string;
+                }>("/spotify/preview", { url: previewUrl });
+                try {
+                    localStorage.setItem(PREVIEW_JOB_LS_KEY, jobId);
+                } catch {}
+                const result = await pollPreviewJob(jobId);
+                setPreview(result);
+                setPlaylistName(result.playlist.name);
+                setStep("preview");
+            } catch (err) {
+                const message =
+                    err instanceof Error
+                        ? err.message
+                        : "Failed to fetch playlist";
+                toast.error(message);
+            } finally {
+                setIsLoading(false);
+                setPreviewStatus(null);
+            }
+        },
+        [pollPreviewJob, toast]
+    );
+
+    // Resume a preview that was in flight when the page was refreshed.
+    useEffect(() => {
+        let jobId: string | null = null;
+        try {
+            jobId = localStorage.getItem(PREVIEW_JOB_LS_KEY);
+        } catch {}
+        if (!jobId) return;
+        (async () => {
+            setIsLoading(true);
+            setPreviewStatus("Resuming preview…");
+            try {
+                const result = await pollPreviewJob(jobId!);
+                setPreview(result);
+                setPlaylistName(result.playlist.name);
+                setStep("preview");
+            } catch {
+                // Job expired or failed while we were away — silently reset.
+                try {
+                    localStorage.removeItem(PREVIEW_JOB_LS_KEY);
+                } catch {}
+            } finally {
+                setIsLoading(false);
+                setPreviewStatus(null);
+            }
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     useEffect(() => {
         let mounted = true;
@@ -188,31 +311,10 @@ function SpotifyImportPageContent() {
         if (urlParam && !hasAutoFetched.current) {
             hasAutoFetched.current = true;
             setUrl(urlParam);
-            // Auto-trigger preview fetch
-            (async () => {
-                setIsLoading(true);
-                try {
-                    const result = await api.post<ImportPreview>(
-                        "/spotify/preview",
-                        { url: urlParam },
-                        { timeout: 180000 } // 3 min timeout for large playlists
-                    );
-                    setPreview(result);
-                    setPlaylistName(result.playlist.name);
-
-                    setStep("preview");
-                } catch (err) {
-                    const message =
-                        err instanceof Error
-                            ? err.message
-                            : "Failed to fetch playlist";
-                    toast.error(message);
-                } finally {
-                    setIsLoading(false);
-                }
-            })();
+            // Auto-trigger the async preview job.
+            void runPreview(urlParam);
         }
-    }, [searchParams, toast]);
+    }, [searchParams, runPreview]);
 
     // Poll for import job status
     useEffect(() => {
@@ -269,31 +371,13 @@ function SpotifyImportPageContent() {
         setUrl(e.target.value);
     };
 
-    // Fetch preview
+    // Fetch preview (async job under the hood).
     const handleFetchPreview = async () => {
         if (!url.trim()) {
             toast.error("Please enter a playlist URL");
             return;
         }
-
-        setIsLoading(true);
-        try {
-            const result = await api.post<ImportPreview>(
-                "/spotify/preview",
-                { url },
-                { timeout: 180000 } // 3 min timeout for large playlists
-            );
-            setPreview(result);
-            setPlaylistName(result.playlist.name);
-
-            setStep("preview");
-        } catch (err) {
-            const message =
-                err instanceof Error ? err.message : "Failed to fetch playlist";
-            toast.error(message);
-        } finally {
-            setIsLoading(false);
-        }
+        await runPreview(url);
     };
 
     // Start import
@@ -557,12 +641,18 @@ function SpotifyImportPageContent() {
                             {isLoading ? (
                                 <>
                                     <Loader2 className="w-4 h-4 animate-spin" />
-                                    Loading...
+                                    {previewStatus || "Loading…"}
                                 </>
                             ) : (
                                 "Continue"
                             )}
                         </button>
+                        {isLoading && previewStatus && (
+                            <p className="text-xs text-white/40 text-center">
+                                Large playlists can take a moment — you can safely
+                                refresh; this will pick back up.
+                            </p>
+                        )}
                     </div>
                 )}
 

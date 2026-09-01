@@ -88,77 +88,49 @@ router.post("/parse", async (req, res) => {
 router.post("/preview", async (req, res) => {
     try {
         const { url } = parseUrlSchema.parse(req.body);
+        const userId = req.user!.id;
 
-        console.log(`[Playlist Import] Generating preview for: ${url}`);
+        console.log(`[Playlist Import] Starting preview job for: ${url}`);
 
-        // Detect if it's a Deezer URL
-        if (url.includes("deezer.com")) {
-            // Extract playlist ID from Deezer URL
-            const deezerMatch = url.match(/playlist[\/:](\d+)/);
-            if (!deezerMatch) {
-                return res
-                    .status(400)
-                    .json({ error: "Invalid Deezer playlist URL" });
-            }
-
-            const playlistId = deezerMatch[1];
-            const deezerPlaylist = await deezerService.getPlaylist(playlistId);
-
-            if (!deezerPlaylist) {
-                return res
-                    .status(404)
-                    .json({ error: "Deezer playlist not found" });
-            }
-
-            // Convert Deezer format to Spotify Import format
-            const preview =
-                await spotifyImportService.generatePreviewFromDeezer(
-                    deezerPlaylist
-                );
-
-            console.log(
-                `[Playlist Import] Deezer preview generated: ${preview.summary.total} tracks, ${preview.summary.inLibrary} in library`
-            );
-            res.json(preview);
-        } else if (youtubeMusicService.parseUrl(url)?.type === "playlist") {
-            // Handle YouTube Music URL
-            const parsed = youtubeMusicService.parseUrl(url);
-            if (!parsed) {
-                return res
-                    .status(400)
-                    .json({ error: "Invalid YouTube Music playlist URL" });
-            }
-
-            const ytPlaylist = await youtubeMusicService.getPlaylist(parsed.id);
-            if (!ytPlaylist) {
-                return res
-                    .status(404)
-                    .json({ error: "YouTube Music playlist not found" });
-            }
-
-            const preview =
-                await spotifyImportService.generatePreviewFromYouTube(ytPlaylist);
-
-            console.log(
-                `[Playlist Import] YouTube Music preview generated: ${preview.summary.total} tracks, ${preview.summary.inLibrary} in library`
-            );
-            res.json(preview);
-        } else {
-            // Handle Spotify URL
-            const preview = await spotifyImportService.generatePreview(url);
-
-            console.log(
-                `[Spotify Import] Preview generated: ${preview.summary.total} tracks, ${preview.summary.inLibrary} in library`
-            );
-            res.json(preview);
-        }
+        // Async: fetch + match run in the background so a large playlist doesn't
+        // block/time out the request. Client polls GET /preview/:jobId.
+        const job = await spotifyImportService.startPreviewJob(userId, url);
+        res.json({ jobId: job.id, status: job.status });
     } catch (error: any) {
         console.error("Playlist preview error:", error);
         if (error.name === "ZodError") {
             return res.status(400).json({ error: "Invalid request body" });
         }
         res.status(500).json({
-            error: error.message || "Failed to generate preview",
+            error: error.message || "Failed to start preview",
+        });
+    }
+});
+
+/**
+ * GET /api/spotify/preview/:jobId
+ * Poll an async preview job (status: fetching | matching | ready | failed).
+ * When ready, `preview` holds the full result. Survives a browser refresh —
+ * the client just re-polls the same id.
+ */
+router.get("/preview/:jobId", async (req, res) => {
+    try {
+        const { jobId } = req.params;
+        const userId = req.user!.id;
+        const job = await spotifyImportService.getPreviewJob(jobId);
+        if (!job) {
+            return res.status(404).json({ error: "Preview job not found" });
+        }
+        if (job.userId !== userId) {
+            return res
+                .status(403)
+                .json({ error: "Not authorized to view this preview" });
+        }
+        res.json(job);
+    } catch (error: any) {
+        console.error("Preview status error:", error);
+        res.status(500).json({
+            error: error.message || "Failed to get preview status",
         });
     }
 });

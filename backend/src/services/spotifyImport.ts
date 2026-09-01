@@ -115,6 +115,27 @@ export interface ImportJob {
 const IMPORT_JOB_KEY = (id: string) => `import:job:${id}`;
 const IMPORT_JOB_TTL = 24 * 60 * 60; // 24 hours
 
+// Preview jobs: async, Redis-only (ephemeral). Making preview a background job
+// keyed by id means a large playlist's fetch+match no longer blocks the request
+// (no proxy/browser timeout), progress can be polled, and the result survives a
+// browser refresh — the client just re-polls the same jobId.
+const PREVIEW_JOB_KEY = (id: string) => `import:preview:${id}`;
+const PREVIEW_JOB_TTL = 60 * 60; // 1 hour
+
+export interface PreviewJob {
+    id: string;
+    userId: string;
+    url: string;
+    status: "fetching" | "matching" | "ready" | "failed";
+    total: number;
+    inLibrary: number;
+    downloadable: number;
+    preview: ImportPreview | null;
+    error: string | null;
+    createdAt: string;
+    updatedAt: string;
+}
+
 /**
  * Save import job to both database and Redis cache for cross-process sharing
  */
@@ -810,6 +831,97 @@ class SpotifyImportService {
                 notFound,
             },
         };
+    }
+
+    // ── Async preview jobs ──────────────────────────────────────────────────
+
+    private async savePreviewJob(job: PreviewJob): Promise<void> {
+        job.updatedAt = new Date().toISOString();
+        try {
+            await redisClient.setEx(
+                PREVIEW_JOB_KEY(job.id),
+                PREVIEW_JOB_TTL,
+                JSON.stringify(job)
+            );
+        } catch (err) {
+            console.warn(`⚠️  Failed to cache preview job ${job.id}:`, err);
+        }
+    }
+
+    async getPreviewJob(id: string): Promise<PreviewJob | null> {
+        try {
+            const cached = await redisClient.get(PREVIEW_JOB_KEY(id));
+            return cached ? (JSON.parse(cached) as PreviewJob) : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Start an async preview job. Fetches + matches in the background and stores
+     * progress/result in Redis; returns immediately with the job id to poll.
+     */
+    async startPreviewJob(userId: string, url: string): Promise<PreviewJob> {
+        const id = `pv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const now = new Date().toISOString();
+        const job: PreviewJob = {
+            id,
+            userId,
+            url,
+            status: "fetching",
+            total: 0,
+            inLibrary: 0,
+            downloadable: 0,
+            preview: null,
+            error: null,
+            createdAt: now,
+            updatedAt: now,
+        };
+        await this.savePreviewJob(job);
+
+        // Run in the background — do NOT await.
+        void this.runPreviewJob(job).catch(async (err: any) => {
+            job.status = "failed";
+            job.error = err?.message || "Failed to generate preview";
+            await this.savePreviewJob(job);
+            console.error(`[Preview ${id}] failed:`, err?.message || err);
+        });
+
+        return job;
+    }
+
+    private async runPreviewJob(job: PreviewJob): Promise<void> {
+        const url = job.url;
+        let preview: ImportPreview;
+
+        if (url.includes("deezer.com")) {
+            const m = url.match(/playlist[\/:](\d+)/);
+            if (!m) throw new Error("Invalid Deezer playlist URL");
+            const deezerPlaylist = await deezerService.getPlaylist(m[1]);
+            if (!deezerPlaylist) throw new Error("Deezer playlist not found");
+            job.status = "matching";
+            await this.savePreviewJob(job);
+            preview = await this.generatePreviewFromDeezer(deezerPlaylist);
+        } else if (youtubeMusicService.parseUrl(url)?.type === "playlist") {
+            const parsed = youtubeMusicService.parseUrl(url);
+            if (!parsed) throw new Error("Invalid YouTube Music playlist URL");
+            const ytPlaylist = await youtubeMusicService.getPlaylist(parsed.id);
+            if (!ytPlaylist) throw new Error("YouTube Music playlist not found");
+            job.status = "matching";
+            await this.savePreviewJob(job);
+            preview = await this.generatePreviewFromYouTube(ytPlaylist);
+        } else {
+            job.status = "matching";
+            await this.savePreviewJob(job);
+            preview = await this.generatePreview(url);
+        }
+
+        job.preview = preview;
+        job.total = preview.summary.total;
+        job.inLibrary = preview.summary.inLibrary;
+        job.downloadable = preview.summary.downloadable;
+        job.status = "ready";
+        await this.savePreviewJob(job);
     }
 
     /**
