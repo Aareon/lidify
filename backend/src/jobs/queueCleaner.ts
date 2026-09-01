@@ -67,6 +67,18 @@ class QueueCleanerService {
                 this.emptyQueueChecks = 0; // Reset counter
             }
 
+            // PART 0.2: Reconcile against our own library — a job whose album
+            // already has tracks on disk (missed webhook, Soulseek, sideload) is
+            // done, no need to ask Lidarr.
+            const libraryReconcile =
+                await simpleDownloadManager.reconcileWithLibrary();
+            if (libraryReconcile.reconciled > 0) {
+                console.log(
+                    `✓ Reconciled ${libraryReconcile.reconciled} job(s) already in the library`
+                );
+                this.emptyQueueChecks = 0; // Reset counter
+            }
+
             // PART 0.25: Reconcile processing jobs with Lidarr (fix missed webhooks)
             const reconcileResult =
                 await simpleDownloadManager.reconcileWithLidarr();

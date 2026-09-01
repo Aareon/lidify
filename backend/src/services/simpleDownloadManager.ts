@@ -1810,6 +1810,112 @@ class SimpleDownloadManager {
     }
 
     /**
+     * Reconcile active jobs against OUR OWN library (independent of Lidarr).
+     *
+     * If a requested album already has tracks on disk in our library, the file
+     * arrived — via a Lidarr import whose webhook we missed, a Soulseek download,
+     * or a sideloaded file that got scanned — so the job should be completed
+     * instead of sitting `processing`/`pending`. Matches by release-group MBID
+     * first, then by (artist + album title). Covers both music-storage and
+     * download-storage tracks (album `location: LIBRARY` with any tracks).
+     */
+    async reconcileWithLibrary(): Promise<{ reconciled: number; errors: string[] }> {
+        const jobs = await prisma.downloadJob.findMany({
+            where: { status: { in: ["processing", "pending"] } },
+        });
+        if (jobs.length === 0) return { reconciled: 0, errors: [] };
+
+        let reconciled = 0;
+        const errors: string[] = [];
+
+        for (const job of jobs) {
+            const metadata = (job.metadata as any) || {};
+            const artistName: string | undefined = metadata.artistName;
+            const albumTitle: string | undefined = metadata.albumTitle;
+            const rgMbid: string | undefined =
+                job.targetMbid || metadata.albumMbid || metadata.lidarrMbid;
+
+            // Nothing to match on.
+            if (!rgMbid && !(artistName && albumTitle)) continue;
+
+            try {
+                // Strong match: an owned album with the requested release-group MBID.
+                let album =
+                    rgMbid && !String(rgMbid).startsWith("temp-")
+                        ? await prisma.album.findFirst({
+                              where: {
+                                  rgMbid: String(rgMbid),
+                                  location: "LIBRARY",
+                                  tracks: { some: {} },
+                              },
+                              select: { id: true },
+                          })
+                        : null;
+
+                // Fallback: owned album matching artist + album title.
+                if (!album && artistName && albumTitle) {
+                    album = await prisma.album.findFirst({
+                        where: {
+                            location: "LIBRARY",
+                            tracks: { some: {} },
+                            title: { equals: albumTitle, mode: "insensitive" },
+                            artist: {
+                                name: { equals: artistName, mode: "insensitive" },
+                            },
+                        },
+                        select: { id: true },
+                    });
+                }
+
+                if (!album) continue;
+
+                console.log(
+                    `   Job ${job.id}: "${job.subject}" already in library - marking complete`
+                );
+                await withTransaction(
+                    (tx) =>
+                        tx.downloadJob.update({
+                            where: { id: job.id },
+                            data: {
+                                status: "completed",
+                                completedAt: new Date(),
+                                error: null,
+                                metadata: {
+                                    ...metadata,
+                                    completedAt: new Date().toISOString(),
+                                    reconciledFromLibrary: true,
+                                },
+                            },
+                        }),
+                    { label: "reconcile-library" }
+                );
+
+                if (job.discoveryBatchId) {
+                    const { discoverWeeklyService } = await import(
+                        "./discoverWeekly"
+                    );
+                    await discoverWeeklyService.checkBatchCompletion(
+                        job.discoveryBatchId
+                    );
+                }
+
+                reconciled++;
+            } catch (error: any) {
+                const msg = `Job ${job.id}: library reconcile error - ${error.message}`;
+                console.error(`   ${msg}`);
+                errors.push(msg);
+            }
+        }
+
+        if (reconciled > 0) {
+            console.log(
+                `[RECONCILE] ${reconciled} job(s) completed from local library`
+            );
+        }
+        return { reconciled, errors };
+    }
+
+    /**
      * Reconcile processing jobs with Lidarr
      * Checks if albums in "processing" state are already available in Lidarr
      * and marks them as completed if so (fixes missed webhook completion events)
