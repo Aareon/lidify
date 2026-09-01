@@ -17,6 +17,7 @@ import { runDataIntegrityCheck } from "./dataIntegrity";
 import { simpleDownloadManager } from "../services/simpleDownloadManager";
 import { cleanupExternalImageCache } from "../services/imageCacheCleanup";
 import { refreshAllPodcasts } from "../services/podcastRefresh";
+import { replayPendingWebhooks } from "../routes/webhooks";
 import { config } from "../config";
 
 // Track intervals and timeouts for cleanup
@@ -279,6 +280,30 @@ intervals.push(
 );
 
 console.log("Podcast refresh scheduled (every 1 hour)");
+
+// Webhook replay: reprocess persisted Lidarr events that arrived during downtime
+// or failed mid-processing. Runs shortly after startup (catch events missed
+// while we were down) and periodically as a safety net.
+setTimeout(async () => {
+    try {
+        const n = await replayPendingWebhooks();
+        if (n > 0) console.log(`Startup webhook replay: reprocessed ${n} event(s)`);
+    } catch (err) {
+        console.error("Startup webhook replay failed:", err);
+    }
+}, 20 * 1000); // 20s after startup
+
+intervals.push(
+    setInterval(async () => {
+        try {
+            await replayPendingWebhooks();
+        } catch (err) {
+            console.error("Webhook replay failed:", err);
+        }
+    }, 2 * 60 * 1000) // Every 2 minutes
+);
+
+console.log("Webhook replay scheduled (every 2 minutes)");
 
 /**
  * Gracefully shutdown all workers and cleanup resources

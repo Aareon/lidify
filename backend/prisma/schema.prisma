@@ -1025,3 +1025,26 @@ model AnomalyIgnore {
 
   @@index([type])
 }
+
+// Durable store of inbound webhooks (currently Lidarr) so events survive a
+// crash/restart and can be replayed idempotently, and duplicate deliveries are
+// de-duped. `dedupeKey` = source:eventType:downloadId:payloadHash — identical
+// re-deliveries collapse to one row; a genuinely different event gets a new row.
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  source      String // "lidarr"
+  eventType   String
+  downloadId  String?
+  dedupeKey   String    @unique
+  payload     Json
+  status      String    @default("received") // received | processed | failed
+  attempts    Int       @default(0)
+  error       String?
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status])
+  @@index([downloadId])
+  @@index([receivedAt])
+}

@@ -8,6 +8,7 @@
 import { Router } from "express";
 import fs from "fs";
 import path from "path";
+import * as crypto from "crypto";
 import { prisma } from "../utils/db";
 import { scanQueue } from "../workers/queues";
 import { discoverWeeklyService } from "../services/discoverWeekly";
@@ -100,6 +101,95 @@ function resolveImportedAlbumScanPath(payload: any, musicRoot: string): string |
     return dirCandidates.sort((a, b) => a.length - b.length)[0];
 }
 
+// Event types we actually act on (worth persisting for replay).
+const ACTIONABLE_EVENTS = new Set([
+    "Grab",
+    "Download",
+    "AlbumDownload",
+    "TrackRetag",
+    "Rename",
+    "ImportFailure",
+    "DownloadFailed",
+    "DownloadFailure",
+]);
+// Give up replaying an event after this many attempts (permanently failing).
+const MAX_WEBHOOK_ATTEMPTS = 10;
+
+/**
+ * Stable de-dup key for an inbound webhook: identical re-deliveries (Lidarr
+ * resends the same payload) collapse to one row; a genuinely different event
+ * (different type or content) gets its own row.
+ */
+function dedupeKeyFor(source: string, eventType: string, payload: any): string {
+    const downloadId = payload?.downloadId || "";
+    const hash = crypto
+        .createHash("sha1")
+        .update(JSON.stringify(payload ?? {}))
+        .digest("hex")
+        .slice(0, 16);
+    return `${source}:${eventType}:${downloadId}:${hash}`;
+}
+
+/**
+ * Dispatch a Lidarr event to its handler. Handlers are idempotent (they match
+ * jobs by current state), so this is safe to run more than once — which is what
+ * makes replay/dedup correct.
+ */
+async function processLidarrEvent(eventType: string, payload: any): Promise<void> {
+    switch (eventType) {
+        case "Grab":
+            await handleGrab(payload);
+            break;
+        case "Download":
+        case "AlbumDownload":
+        case "TrackRetag":
+        case "Rename":
+            await handleDownload(payload);
+            break;
+        case "ImportFailure":
+        case "DownloadFailed":
+        case "DownloadFailure":
+            await handleImportFailure(payload);
+            break;
+        default:
+            console.log(`   Unhandled event: ${eventType}`);
+    }
+}
+
+/**
+ * Process one persisted webhook event and record the outcome. Never throws —
+ * a failure is stored as `failed` for the replay loop to retry later.
+ */
+async function processAndMarkEvent(event: {
+    id: string;
+    eventType: string;
+    payload: any;
+}): Promise<boolean> {
+    try {
+        await prisma.webhookEvent.update({
+            where: { id: event.id },
+            data: { attempts: { increment: 1 } },
+        });
+        await processLidarrEvent(event.eventType, event.payload);
+        await prisma.webhookEvent.update({
+            where: { id: event.id },
+            data: { status: "processed", processedAt: new Date(), error: null },
+        });
+        return true;
+    } catch (err: any) {
+        console.error(
+            `[WEBHOOK] Processing failed for ${event.eventType} (${event.id}): ${err?.message || err}`
+        );
+        await prisma.webhookEvent
+            .update({
+                where: { id: event.id },
+                data: { status: "failed", error: String(err?.message || err) },
+            })
+            .catch(() => {});
+        return false;
+    }
+}
+
 // POST /webhooks/lidarr - Handle Lidarr webhooks
 router.post("/lidarr", async (req, res) => {
     try {
@@ -120,52 +210,109 @@ router.post("/lidarr", async (req, res) => {
             });
         }
 
-        const eventType = req.body.eventType;
+        const eventType = req.body?.eventType;
         console.log(`[WEBHOOK] Lidarr event: ${eventType}`);
 
-        // Log payload in debug mode only (avoid verbose logs in production)
         if (process.env.DEBUG_WEBHOOKS === "true") {
             console.log(`   Payload:`, JSON.stringify(req.body, null, 2));
         }
 
-        switch (eventType) {
-            case "Grab":
-                await handleGrab(req.body);
-                break;
-
-            case "Download":
-            case "AlbumDownload":
-            case "TrackRetag":
-            case "Rename":
-                await handleDownload(req.body);
-                break;
-
-            case "ImportFailure":
-            case "DownloadFailed":
-            case "DownloadFailure":
-                await handleImportFailure(req.body);
-                break;
-
-            case "Health":
-            case "HealthIssue":
-            case "HealthRestored":
-                // Ignore health events
-                break;
-
-            case "Test":
+        // Non-actionable events (Test/Health/unknown): ack without persisting.
+        if (!ACTIONABLE_EVENTS.has(eventType)) {
+            if (eventType === "Test") {
                 console.log("   Lidarr test webhook received");
-                break;
-
-            default:
-                console.log(`   Unhandled event: ${eventType}`);
+            }
+            return res.json({ success: true, ignored: true });
         }
 
+        const dedupeKey = dedupeKeyFor("lidarr", eventType, req.body);
+        const downloadId = req.body?.downloadId ?? null;
+
+        // Persist FIRST so the event survives a crash mid-processing and can be
+        // replayed. A unique-constraint hit on dedupeKey means this exact event
+        // was already delivered — de-dup it.
+        let event: { id: string; eventType: string; payload: any; status: string };
+        try {
+            event = await prisma.webhookEvent.create({
+                data: {
+                    source: "lidarr",
+                    eventType,
+                    downloadId,
+                    dedupeKey,
+                    payload: req.body,
+                    status: "received",
+                },
+                select: { id: true, eventType: true, payload: true, status: true },
+            });
+        } catch (err: any) {
+            if (err?.code === "P2002") {
+                const existing = await prisma.webhookEvent.findUnique({
+                    where: { dedupeKey },
+                    select: { id: true, eventType: true, payload: true, status: true },
+                });
+                if (!existing || existing.status === "processed") {
+                    console.log(
+                        `[WEBHOOK] Duplicate ${eventType} (already processed) - skipping`
+                    );
+                    return res.json({ success: true, deduped: true });
+                }
+                event = existing; // received/failed -> (re)process below
+            } else {
+                throw err;
+            }
+        }
+
+        // Process inline and record outcome. We always ack 200 once persisted:
+        // a processing failure is retried by the replay loop, so Lidarr never
+        // needs to resend.
+        await processAndMarkEvent(event);
         res.json({ success: true });
     } catch (error: any) {
         console.error("Webhook error:", error.message);
         res.status(500).json({ error: "Webhook processing failed" });
     }
 });
+
+/**
+ * Replay webhook events that were never processed (received) or failed —
+ * covers events that arrived during downtime or crashed mid-processing.
+ * Idempotent; skips events still within a short settle window and those that
+ * have exhausted their retry budget. Also prunes old processed rows.
+ */
+export async function replayPendingWebhooks(limit = 100): Promise<number> {
+    const settleBefore = new Date(Date.now() - 10_000); // avoid racing inline processing
+    const pending = await prisma.webhookEvent.findMany({
+        where: {
+            status: { in: ["received", "failed"] },
+            attempts: { lt: MAX_WEBHOOK_ATTEMPTS },
+            receivedAt: { lt: settleBefore },
+        },
+        orderBy: { receivedAt: "asc" },
+        take: limit,
+        select: { id: true, eventType: true, payload: true, status: true },
+    });
+
+    let replayed = 0;
+    for (const event of pending) {
+        const ok = await processAndMarkEvent(event);
+        if (ok) replayed++;
+    }
+    if (replayed > 0) {
+        console.log(`[WEBHOOK] Replayed ${replayed}/${pending.length} pending event(s)`);
+    }
+
+    // Prune processed events older than 7 days to keep the table small.
+    await prisma.webhookEvent
+        .deleteMany({
+            where: {
+                status: "processed",
+                processedAt: { lt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+            },
+        })
+        .catch(() => {});
+
+    return replayed;
+}
 
 /**
  * Handle Grab event (download started by Lidarr)
