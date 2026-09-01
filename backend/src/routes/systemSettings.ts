@@ -940,18 +940,21 @@ router.post("/library-health/reenrich", async (req, res) => {
         }
 
         const { enrichSimilarArtist } = await import("../workers/artistEnrichment");
+        // enrichSimilarArtist mutates the passed object's mbid (and, when it
+        // resolves a duplicate by merging, its id/name) to the survivor. The
+        // original row may be gone after a merge, so trust the mutated object
+        // rather than re-fetching by the original id.
         await enrichSimilarArtist(artist);
 
-        const after = await prisma.artist.findUnique({
-            where: { id: artistId },
-            select: { mbid: true },
-        });
-        const resolved = !!after && !after.mbid.startsWith("temp-");
+        const resolvedMbid = artist.mbid;
+        const resolved = !!resolvedMbid && !resolvedMbid.startsWith("temp-");
 
         res.json({
             success: true,
             resolved,
-            mbid: after?.mbid ?? null,
+            mbid: resolved ? resolvedMbid : null,
+            artistId: artist.id,
+            artistName: artist.name,
             message: resolved
                 ? "Resolved to a real MusicBrainz ID and refreshed metadata"
                 : "No MusicBrainz match found — the artist still has no real ID",

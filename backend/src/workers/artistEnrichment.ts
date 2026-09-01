@@ -49,18 +49,75 @@ export async function enrichSimilarArtist(artist: Artist): Promise<void> {
                 );
                 if (mbResults.length > 0 && mbResults[0].id) {
                     const realMbid = mbResults[0].id;
+                    const canonicalName = mbResults[0].name || artist.name;
                     console.log(
-                        `${logPrefix} MusicBrainz: Found real MBID: ${realMbid}`
+                        `${logPrefix} MusicBrainz: Found real MBID: ${realMbid} (${canonicalName})`
                     );
 
-                    // Update artist with real MBID
-                    await prisma.artist.update({
-                        where: { id: artist.id },
-                        data: { mbid: realMbid },
+                    // Is this MBID ALREADY held by another artist? Then they're
+                    // the same MusicBrainz entity — a duplicate (e.g. "Kanye" vs
+                    // "Kanye West"/"Ye", or a collab string that grabbed the solo
+                    // artist's MBID). Merge instead of hitting the unique
+                    // constraint on Artist.mbid and silently failing (the bug
+                    // that left these stuck with temp MBIDs in Library Health).
+                    const holder = await prisma.artist.findFirst({
+                        where: { mbid: realMbid, id: { not: artist.id } },
+                        select: { id: true, name: true },
                     });
 
-                    // Update the local artist object
-                    artist.mbid = realMbid;
+                    if (holder) {
+                        const norm = (s: string) =>
+                            normalizeArtistName(s || "").toLowerCase();
+                        const canon = norm(canonicalName);
+                        const thisIsCanonical = norm(artist.name) === canon;
+                        const holderIsCanonical = norm(holder.name) === canon;
+
+                        // Survivor: prefer whichever name matches MB's canonical
+                        // name; otherwise keep the existing MBID holder (so we
+                        // don't have to move the MBID around).
+                        let keepId: string;
+                        let mergeId: string;
+                        if (thisIsCanonical && !holderIsCanonical) {
+                            keepId = artist.id;
+                            mergeId = holder.id;
+                        } else {
+                            keepId = holder.id;
+                            mergeId = artist.id;
+                        }
+
+                        console.log(
+                            `${logPrefix} MBID ${realMbid} already on "${holder.name}" — merging duplicate (keeping ${keepId})`
+                        );
+                        const { mergeArtistInto } = await import(
+                            "../services/artistMerge"
+                        );
+                        const mergeResult = await mergeArtistInto(
+                            keepId,
+                            mergeId
+                        );
+
+                        // If we kept the (formerly temp) artist, the holder was
+                        // deleted and its MBID is now free — assign it. (No-op
+                        // when the survivor already had the real MBID.)
+                        await prisma.artist
+                            .update({
+                                where: { id: keepId },
+                                data: { mbid: realMbid },
+                            })
+                            .catch(() => {});
+
+                        // Point the in-memory object at the survivor so the rest
+                        // of enrichment (and the caller's success check) uses it.
+                        artist.id = keepId;
+                        artist.mbid = realMbid;
+                        artist.name = mergeResult.keptName;
+                    } else {
+                        await prisma.artist.update({
+                            where: { id: artist.id },
+                            data: { mbid: realMbid },
+                        });
+                        artist.mbid = realMbid;
+                    }
                 } else {
                     console.log(
                         `${logPrefix} MusicBrainz: No match found, keeping temp MBID`
