@@ -1048,3 +1048,21 @@ model WebhookEvent {
   @@index([downloadId])
   @@index([receivedAt])
 }
+
+// Client-reported playback failures for downloaded (local-file) tracks, surfaced
+// as "unplayable_track" on Settings → Library Health. One row per track;
+// repeat failures bump `count`. `reason` is classified server-side:
+// missing_file (not on disk) | playback_error (on disk but failed to load/decode).
+// Dismissing in Library Health deletes the row, so a new failure re-surfaces it.
+model PlaybackFailure {
+  trackId    String   @id
+  reason     String
+  stage      String // load | play
+  error      String?
+  count      Int      @default(1)
+  lastUserId String?
+  firstAt    DateTime @default(now())
+  lastAt     DateTime @default(now())
+
+  @@index([lastAt])
+}

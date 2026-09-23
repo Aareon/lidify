@@ -909,6 +909,14 @@ router.post("/library-health/ignore", async (req, res) => {
     try {
         const { key, type } = req.body || {};
         if (!key) return res.status(400).json({ error: "key is required" });
+        // Unplayable tracks are dismissed by clearing the failure record rather
+        // than ignoring the key forever, so a later failure re-surfaces it.
+        if (typeof key === "string" && key.startsWith("unplayable_track:")) {
+            await prisma.playbackFailure.deleteMany({
+                where: { trackId: key.slice("unplayable_track:".length) },
+            });
+            return res.json({ success: true });
+        }
         await prisma.anomalyIgnore.upsert({
             where: { key },
             create: { key, type: type || "unknown" },

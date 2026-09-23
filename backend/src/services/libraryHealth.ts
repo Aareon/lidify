@@ -10,6 +10,8 @@ import { looseArtistKey, artistNameSimilarity } from "../utils/artistNormalizati
  *     artist (exact key or guarded fuzzy) → suggest merging.
  *   - missing_mbid: a temp-MBID artist with NO duplicate → never enriched to a
  *     real MusicBrainz ID (limited metadata) → suggest re-enriching.
+ *   - unplayable_track: a downloaded track the player reported as failing to
+ *     load/play (file missing on disk, or present but undecodable).
  */
 
 // Fuzzy matching thresholds for duplicate detection. Deliberately conservative:
@@ -19,7 +21,7 @@ const MIN_KEY_LEN = 6; // skip short names — their similarity scores are volat
 const MAX_LEN_DELTA = 2; // candidate name length must be within this many chars
 const AMBIGUITY_MARGIN = 5; // best must beat the runner-up by this much
 
-export type AnomalyType = "duplicate_artist" | "missing_mbid";
+export type AnomalyType = "duplicate_artist" | "missing_mbid" | "unplayable_track";
 
 export interface DuplicateArtistData {
     keepId: string;
@@ -61,7 +63,33 @@ export interface MissingMbidAnomaly {
     data: MissingMbidData;
 }
 
-export type Anomaly = DuplicateArtistAnomaly | MissingMbidAnomaly;
+export interface UnplayableTrackData {
+    trackId: string;
+    title: string;
+    artistName: string;
+    albumTitle: string;
+    filePath: string;
+    reason: "missing_file" | "playback_error";
+    stage: string;
+    error: string | null;
+    count: number;
+    firstAt: string;
+    lastAt: string;
+}
+
+export interface UnplayableTrackAnomaly {
+    key: string;
+    type: "unplayable_track";
+    severity: "info" | "warning";
+    summary: string;
+    suggestedAction: "review_file";
+    data: UnplayableTrackData;
+}
+
+export type Anomaly =
+    | DuplicateArtistAnomaly
+    | MissingMbidAnomaly
+    | UnplayableTrackAnomaly;
 
 type ArtistLite = { id: string; name: string; mbid: string };
 
@@ -135,10 +163,76 @@ export async function detectAnomalies(): Promise<Anomaly[]> {
         },
     }));
 
+    const unplayable = await detectUnplayableTracks();
+
     const ignored = new Set(ignoredRows.map((r) => r.key));
-    return [...dupAnomalies, ...mbidAnomalies].filter(
+    return [...unplayable, ...dupAnomalies, ...mbidAnomalies].filter(
         (a) => !ignored.has(a.key)
     );
+}
+
+/**
+ * Downloaded tracks the player reported as unplayable. Rows for tracks that no
+ * longer exist (deleted/rescanned away) are pruned here.
+ */
+async function detectUnplayableTracks(): Promise<Anomaly[]> {
+    const failures = await prisma.playbackFailure.findMany({
+        orderBy: { lastAt: "desc" },
+    });
+    if (failures.length === 0) return [];
+
+    const tracks = await prisma.track.findMany({
+        where: { id: { in: failures.map((f) => f.trackId) } },
+        select: {
+            id: true,
+            title: true,
+            filePath: true,
+            album: { select: { title: true, artist: { select: { name: true } } } },
+        },
+    });
+    const trackById = new Map(tracks.map((t) => [t.id, t]));
+
+    const orphaned = failures
+        .filter((f) => !trackById.has(f.trackId))
+        .map((f) => f.trackId);
+    if (orphaned.length > 0) {
+        await prisma.playbackFailure
+            .deleteMany({ where: { trackId: { in: orphaned } } })
+            .catch(() => {});
+    }
+
+    return failures.flatMap((f): Anomaly[] => {
+        const t = trackById.get(f.trackId);
+        if (!t) return [];
+        const reason =
+            f.reason === "missing_file" ? "missing_file" : "playback_error";
+        const artistName = t.album?.artist?.name || "Unknown Artist";
+        return [
+            {
+                key: `unplayable_track:${t.id}`,
+                type: "unplayable_track",
+                severity: "warning",
+                summary:
+                    reason === "missing_file"
+                        ? `"${t.title}" by ${artistName} can't be played — the file is missing from disk`
+                        : `"${t.title}" by ${artistName} failed to play — the file may be corrupt or unsupported`,
+                suggestedAction: "review_file",
+                data: {
+                    trackId: t.id,
+                    title: t.title,
+                    artistName,
+                    albumTitle: t.album?.title || "",
+                    filePath: t.filePath,
+                    reason,
+                    stage: f.stage,
+                    error: f.error,
+                    count: f.count,
+                    firstAt: f.firstAt.toISOString(),
+                    lastAt: f.lastAt.toISOString(),
+                },
+            },
+        ];
+    });
 }
 
 interface DuplicateMatch {
