@@ -38,36 +38,6 @@ function podcastDebugLog(message: string, data?: Record<string, unknown>) {
  * Handles: web playback, progress saving for audiobooks/podcasts
  * Browser media controls are handled separately by useMediaSession hook
  */
-/**
- * Tell the listener a downloaded (local-file) track couldn't be played, instead
- * of silently skipping it. Probes the stream once to say *why*: the server
- * failing to serve the file (missing/unreadable on disk) vs. the browser being
- * unable to decode what it received (corrupt/unsupported format).
- */
-async function notifyUnplayableTrack(track: Track | null, skipping: boolean) {
-    if (!track?.filePath || track.previewUrl) return;
-
-    let reason = "The file couldn't be played";
-    try {
-        const res = await fetch(api.getStreamUrl(track.id), {
-            headers: { Range: "bytes=0-0" },
-            credentials: "include",
-        });
-        reason = res.ok
-            ? "The file is corrupt or in an unsupported format"
-            : "The file is missing or unreadable on the server";
-        res.body?.cancel().catch(() => {});
-    } catch {
-        // Network failure — keep the generic reason.
-    }
-
-    const artist = track.artist?.name ? ` — ${track.artist.name}` : "";
-    toast.error(`Can't play "${track.title}"${artist}`, {
-        id: `unplayable-${track.id}`,
-        description: skipping ? `${reason}. Skipping to the next track.` : reason,
-    });
-}
-
 export const HowlerAudioElement = memo(function HowlerAudioElement() {
     // State context
     const {
@@ -249,7 +219,6 @@ export const HowlerAudioElement = memo(function HowlerAudioElement() {
             isUserInitiatedRef.current = false;
 
             if (playbackType === "track") {
-                void notifyUnplayableTrack(currentTrack, queue.length > 1);
                 if (queue.length > 1) {
                     console.log(
                         "[HowlerAudioElement] Track failed to load, trying next in queue"
@@ -335,7 +304,6 @@ export const HowlerAudioElement = memo(function HowlerAudioElement() {
             isUserInitiatedRef.current = false;
 
             if (playbackType === "track") {
-                void notifyUnplayableTrack(currentTrack, queue.length > 1);
                 if (queue.length > 1) {
                     console.log(
                         "[HowlerAudioElement] Track failed to play, trying next in queue"
