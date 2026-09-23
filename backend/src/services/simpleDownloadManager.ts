@@ -1838,6 +1838,11 @@ class SimpleDownloadManager {
             // Nothing to match on.
             if (!rgMbid && !(artistName && albumTitle)) continue;
 
+            // Smart-upgrade jobs exist precisely because the album is only
+            // partially on disk, so "album has tracks" doesn't mean done. Let
+            // the Lidarr webhook / Lidarr reconcile complete them instead.
+            if (metadata.reason === "smart-upgrade") continue;
+
             try {
                 // Strong match: an owned album with the requested release-group MBID.
                 let album =

@@ -65,11 +65,23 @@ export async function enrichSimilarArtist(artist: Artist): Promise<void> {
                         select: { id: true, name: true },
                     });
 
-                    if (holder) {
-                        const norm = (s: string) =>
-                            normalizeArtistName(s || "").toLowerCase();
-                        const canon = norm(canonicalName);
-                        const thisIsCanonical = norm(artist.name) === canon;
+                    const norm = (s: string) =>
+                        normalizeArtistName(s || "").toLowerCase();
+                    const canon = norm(canonicalName);
+                    const thisIsCanonical = norm(artist.name) === canon;
+                    // The search is fuzzy top-1, so only treat this artist as the
+                    // same MB entity when its name is the canonical name or a
+                    // listed alias — otherwise a loose hit would merge (move all
+                    // albums/tracks of) two genuinely different artists.
+                    const thisIsAlias = (mbResults[0].aliases || []).some(
+                        (a: any) => norm(a?.name) === norm(artist.name)
+                    );
+
+                    if (holder && !thisIsCanonical && !thisIsAlias) {
+                        console.log(
+                            `${logPrefix} MBID ${realMbid} already on "${holder.name}" but "${artist.name}" is not a confident name/alias match — keeping temp MBID (no merge)`
+                        );
+                    } else if (holder) {
                         const holderIsCanonical = norm(holder.name) === canon;
 
                         // Survivor: prefer whichever name matches MB's canonical
