@@ -11,9 +11,19 @@ import {
 } from "@/lib/api";
 import { RefreshCw, ArrowRight, Merge, X, CheckCircle2, Sparkles } from "lucide-react";
 
+const timeAgo = (iso: string) => {
+    const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.round(mins / 60);
+    if (hrs < 48) return `${hrs}h ago`;
+    return `${Math.round(hrs / 24)}d ago`;
+};
+
 /**
  * Library Health — surfaces detected data anomalies (likely-duplicate artists,
- * and artists missing a real MusicBrainz ID) for an admin to resolve.
+ * artists missing a real MusicBrainz ID, and downloaded tracks the player
+ * reported as unplayable) for an admin to resolve.
  * High-confidence duplicates are auto-merged by the background worker; the
  * fuzzy/uncertain ones and enrichment gaps show up here for review.
  */
@@ -99,7 +109,7 @@ export function LibraryHealthSection() {
         <SettingsSection
             id="library-health"
             title="Library Health"
-            description="Review and resolve detected data anomalies, like duplicate or un-enriched artists"
+            description="Review and resolve detected data anomalies, like duplicate or un-enriched artists and unplayable tracks"
         >
             <div className="flex items-center justify-between pb-2">
                 <div className="text-sm text-[#888]">
@@ -181,6 +191,42 @@ export function LibraryHealthSection() {
                                         rounded-full hover:bg-[#333] hover:text-white disabled:opacity-50 transition-colors"
                                 >
                                     <X className="w-3.5 h-3.5" /> Not a duplicate
+                                </button>
+                            </div>
+                        </div>
+                    ) : a.type === "unplayable_track" ? (
+                        <div key={a.key} className="rounded-lg border border-[#333] bg-[#1a1a1a] p-3">
+                            <div className="flex items-center gap-2 mb-2">
+                                <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-red-500/15 text-red-400">
+                                    {a.data.reason === "missing_file" ? "Missing file" : "Playback failed"}
+                                </span>
+                                <span className="text-xs text-[#666]">
+                                    {a.data.count} failure{a.data.count === 1 ? "" : "s"} · last {timeAgo(a.data.lastAt)}
+                                </span>
+                            </div>
+
+                            <div className="text-sm">
+                                <div className="text-white truncate">
+                                    {a.data.title} <span className="text-[#888]">— {a.data.artistName}</span>
+                                </div>
+                                <div className="text-xs text-[#666] truncate" title={a.data.filePath}>
+                                    {a.data.filePath}
+                                </div>
+                                <div className="text-xs text-[#888] pt-1">
+                                    {a.data.reason === "missing_file"
+                                        ? "The file isn't on disk. Re-download it, or rescan the library to drop the stale entry."
+                                        : "The file exists but failed to load or decode — it may be corrupt or in an unsupported format."}
+                                </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 pt-3">
+                                <button
+                                    onClick={() => handleIgnore(a)}
+                                    disabled={busyKey === a.key}
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm bg-[#262626] text-[#aaa]
+                                        rounded-full hover:bg-[#333] hover:text-white disabled:opacity-50 transition-colors"
+                                >
+                                    <X className="w-3.5 h-3.5" /> Dismiss
                                 </button>
                             </div>
                         </div>

@@ -114,6 +114,8 @@ const ACTIONABLE_EVENTS = new Set([
 ]);
 // Give up replaying an event after this many attempts (permanently failing).
 const MAX_WEBHOOK_ATTEMPTS = 10;
+// Identical deliveries inside this window are treated as re-sends and skipped.
+const DEDUPE_WINDOW_MS = 10 * 60 * 1000;
 
 /**
  * Stable de-dup key for an inbound webhook: identical re-deliveries (Lidarr
@@ -248,9 +250,24 @@ router.post("/lidarr", async (req, res) => {
             if (err?.code === "P2002") {
                 const existing = await prisma.webhookEvent.findUnique({
                     where: { dedupeKey },
-                    select: { id: true, eventType: true, payload: true, status: true },
+                    select: {
+                        id: true,
+                        eventType: true,
+                        payload: true,
+                        status: true,
+                        processedAt: true,
+                    },
                 });
-                if (!existing || existing.status === "processed") {
+                // Lidarr payloads carry no timestamp, so a genuinely new event
+                // (e.g. the same release re-grabbed later) hashes identically.
+                // Only treat a processed match as a duplicate within a short
+                // redelivery window; older matches are processed again.
+                const recentlyProcessed =
+                    existing?.status === "processed" &&
+                    !!existing.processedAt &&
+                    Date.now() - existing.processedAt.getTime() <
+                        DEDUPE_WINDOW_MS;
+                if (!existing || recentlyProcessed) {
                     console.log(
                         `[WEBHOOK] Duplicate ${eventType} (already processed) - skipping`
                     );

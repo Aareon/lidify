@@ -171,9 +171,29 @@ export default function BrowsePlaylistDetailPage() {
         if (!playlist || isSaving) return;
         setIsSaving(true);
         try {
-            // First get preview data
-            const preview = await api.post<{ tracks: unknown[] }>("/spotify/preview", { url: playlist.url });
-            
+            // First get preview data (async job — start it, then poll until ready)
+            const { jobId } = await api.post<{ jobId: string; status: string }>(
+                "/spotify/preview",
+                { url: playlist.url }
+            );
+            let preview: unknown = null;
+            for (let i = 0; i < 320 && !preview; i++) {
+                const job = await api.get<{
+                    status: "fetching" | "matching" | "ready" | "failed";
+                    preview: unknown;
+                    error: string | null;
+                }>(`/spotify/preview/${jobId}`);
+                if (job.status === "failed") {
+                    throw new Error(job.error || "Failed to generate preview");
+                }
+                if (job.status === "ready" && job.preview) {
+                    preview = job.preview;
+                    break;
+                }
+                await new Promise((r) => setTimeout(r, 1500));
+            }
+            if (!preview) throw new Error("Preview timed out");
+
             // Then start import with skipDownload=true
             await api.post<{ jobId: string; status: string }>(
                 "/spotify/import",

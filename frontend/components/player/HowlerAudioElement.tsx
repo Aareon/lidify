@@ -38,6 +38,21 @@ function podcastDebugLog(message: string, data?: Record<string, unknown>) {
  * Handles: web playback, progress saving for audiobooks/podcasts
  * Browser media controls are handled separately by useMediaSession hook
  */
+/**
+ * Report a downloaded (local-file) track that failed to load/play so it shows
+ * up on Settings → Library Health. Best-effort: never blocks skipping ahead.
+ */
+function reportUnplayableTrack(
+    track: Track | null,
+    stage: "load" | "play",
+    error: unknown
+) {
+    if (!track?.filePath || track.previewUrl) return;
+    api.reportPlaybackError(track.id, stage, error).catch((err) => {
+        console.warn("[HowlerAudioElement] Failed to report playback error:", err);
+    });
+}
+
 export const HowlerAudioElement = memo(function HowlerAudioElement() {
     // State context
     const {
@@ -219,6 +234,7 @@ export const HowlerAudioElement = memo(function HowlerAudioElement() {
             isUserInitiatedRef.current = false;
 
             if (playbackType === "track") {
+                reportUnplayableTrack(currentTrack, "load", data.error);
                 if (queue.length > 1) {
                     console.log(
                         "[HowlerAudioElement] Track failed to load, trying next in queue"
@@ -304,6 +320,7 @@ export const HowlerAudioElement = memo(function HowlerAudioElement() {
             isUserInitiatedRef.current = false;
 
             if (playbackType === "track") {
+                reportUnplayableTrack(currentTrack, "play", data.error);
                 if (queue.length > 1) {
                     console.log(
                         "[HowlerAudioElement] Track failed to play, trying next in queue"

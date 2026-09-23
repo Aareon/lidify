@@ -3455,6 +3455,64 @@ router.get("/cover-art-colors", imageLimiter, async (req, res) => {
 });
 
 // GET /library/tracks/:id/stream
+/**
+ * POST /library/tracks/:id/playback-error
+ * The player reports a downloaded (local-file) track that failed to load or
+ * play. Recorded for Settings → Library Health; the cause is classified here
+ * (file present on disk or not) rather than trusted from the client.
+ * Body: { stage: "load" | "play", error?: string }
+ */
+router.post("/tracks/:id/playback-error", async (req, res) => {
+    try {
+        const track = await prisma.track.findUnique({
+            where: { id: req.params.id },
+            select: { id: true, filePath: true, fileStorage: true },
+        });
+        if (!track) return res.status(404).json({ error: "Track not found" });
+        if (!track.filePath) return res.json({ recorded: false });
+
+        const stage = req.body?.stage === "play" ? "play" : "load";
+        const error =
+            req.body?.error != null ? String(req.body.error).slice(0, 500) : null;
+
+        const absolutePath = await resolveTrackAbsolutePath(
+            track.filePath,
+            track.fileStorage
+        );
+        const reason =
+            absolutePath && fs.existsSync(absolutePath)
+                ? "playback_error"
+                : "missing_file";
+
+        await prisma.playbackFailure.upsert({
+            where: { trackId: track.id },
+            create: {
+                trackId: track.id,
+                reason,
+                stage,
+                error,
+                lastUserId: req.user?.id ?? null,
+            },
+            update: {
+                reason,
+                stage,
+                error,
+                lastUserId: req.user?.id ?? null,
+                count: { increment: 1 },
+                lastAt: new Date(),
+            },
+        });
+
+        console.warn(
+            `[PLAYBACK] Track ${track.id} unplayable (${reason}, ${stage}): ${track.filePath}`
+        );
+        res.json({ recorded: true, reason });
+    } catch (error: any) {
+        console.error("[PLAYBACK] Failed to record playback error:", error);
+        res.status(500).json({ error: "Failed to record playback error" });
+    }
+});
+
 router.get("/tracks/:id/stream", async (req, res) => {
     try {
         console.log("[STREAM] Request received for track:", req.params.id);

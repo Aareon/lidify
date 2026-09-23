@@ -103,7 +103,33 @@ export interface MissingMbidAnomaly {
     data: MissingMbidData;
 }
 
-export type Anomaly = DuplicateArtistAnomaly | MissingMbidAnomaly;
+export interface UnplayableTrackData {
+    trackId: string;
+    title: string;
+    artistName: string;
+    albumTitle: string;
+    filePath: string;
+    reason: "missing_file" | "playback_error";
+    stage: string;
+    error: string | null;
+    count: number;
+    firstAt: string;
+    lastAt: string;
+}
+
+export interface UnplayableTrackAnomaly {
+    key: string;
+    type: "unplayable_track";
+    severity: "info" | "warning";
+    summary: string;
+    suggestedAction: "review_file";
+    data: UnplayableTrackData;
+}
+
+export type Anomaly =
+    | DuplicateArtistAnomaly
+    | MissingMbidAnomaly
+    | UnplayableTrackAnomaly;
 
 // New Mood Bucket Types (simplified mood system)
 export type MoodType =
@@ -1114,6 +1140,20 @@ class ApiClient {
         return this.request<{ success: boolean; result: { keptName: string; movedAlbums: number; movedOwned: number } }>(
             "/system-settings/library-health/merge-artists",
             { method: "POST", body: JSON.stringify({ keepId, mergeId }) }
+        );
+    }
+
+    // Player → server: a downloaded track failed to load/play (Library Health).
+    async reportPlaybackError(trackId: string, stage: "load" | "play", error?: unknown) {
+        return this.request<{ recorded: boolean; reason?: string }>(
+            `/library/tracks/${trackId}/playback-error`,
+            {
+                method: "POST",
+                body: JSON.stringify({
+                    stage,
+                    error: error == null ? undefined : String(error),
+                }),
+            }
         );
     }
 
